@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"strings"
+	"syscall"
 
 	"dagger.io/dagger"
 )
@@ -24,6 +26,19 @@ func usage() {
 }
 
 func main() {
+	if _, ok := os.LookupEnv("DAGGER_SESSION_TOKEN"); !ok {
+		args := make([]string, len(os.Args)+2)
+		var err error
+		args[0], err = exec.LookPath("dagger")
+		if err != nil {
+			panic("TODO: auto download dagger")
+		}
+		args[1] = "run"
+		copy(args[2:], os.Args)
+		err = syscall.Exec(args[0], args, os.Environ())
+		panic(fmt.Errorf("unexpected reexec failure %v: %w", args, err))
+	}
+
 	if len(os.Args) <= 1 {
 		usage()
 		return
