@@ -2,7 +2,10 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"strings"
@@ -13,11 +16,17 @@ import (
 
 var dag *dagger.Client
 
-func M[T any](v T, err error) T {
+func M2[T any](v T, err error) T {
 	if err != nil {
 		panic(err)
 	}
 	return v
+}
+
+func M(err error) {
+	if err != nil {
+		panic(err)
+	}
 }
 
 func usage() {
@@ -35,7 +44,9 @@ func main() {
 		}
 		args[1] = "run"
 		copy(args[2:], os.Args)
-		err = syscall.Exec(args[0], args, os.Environ())
+		env := os.Environ()
+		// env = append(env, "DAGGER_LOG_STDERR=dagger.log")
+		err = syscall.Exec(args[0], args, env)
 		panic(fmt.Errorf("unexpected reexec failure %v: %w", args, err))
 	}
 
@@ -55,8 +66,10 @@ func main() {
 
 	ctx := context.Background()
 
+	fmt.Fprintf(os.Stderr, "Loading sandbox for %s...\n", codingAgent)
+
 	var err error
-	dag, err = dagger.Connect(context.Background() /* dagger.WithStdio(os.Stdin, os.Stdout, os.Stderr), */, dagger.WithLogOutput(os.Stderr))
+	dag, err = dagger.Connect(context.Background(), dagger.WithLogOutput(os.Stderr))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error starting dagger: %v\n", err)
 		os.Exit(1)
@@ -64,19 +77,38 @@ func main() {
 	defer dag.Close()
 
 	// TODO: why do we need withExposedPort ? Can't we just rely on the base image's EXPOSE ?
-	svc := dag.Container().From("tiborvass/coding-proxy").WithExposedPort(8080).AsService(dagger.ContainerAsServiceOpts{ExperimentalPrivilegedNesting: false})
-	svc = M(dag.Host().Tunnel(svc).Start(ctx))
+	svc := dag.Container().From("tiborvass/coding-proxy").WithExposedPort(8080).AsService(dagger.ContainerAsServiceOpts{ExperimentalPrivilegedNesting: true})
+	svc = M2(dag.Host().Tunnel(svc).Start(ctx))
 	// svc.Endpoint(ctx, dagger.ServiceEndpointOpts{})
-	ports := M(svc.Ports(ctx))
+	ports := M2(svc.Ports(ctx))
 	if len(ports) != 1 {
 		panic("expected to find exposed ports for coding-proxy")
 	}
-	port := M(ports[0].Port(ctx))
+	port := M2(ports[0].Port(ctx))
+
+	host := M2(svc.Hostname(ctx))
+	resp := M2(http.Get(fmt.Sprintf("http://%s:%d", host, port)))
+	defer resp.Body.Close()
+	io.Copy(os.Stdout, resp.Body)
+	return
 
 	// creds := dag.Host().SetSecretFile("claude-credentials", "/tmp/claude-credentials.json")
 	// creds := dag.Secret("file:///tmp/claude-credentials.json")
-	claudeFile := dag.Host().File("/tmp/claude.json")
-	claudeState := dag.Host().Directory("/tmp/claude.state")
+	claudeJSONBytes := []byte(M2(dag.Host().File("/tmp/claude.json").Contents(ctx)))
+	var claudeJSON map[string]any
+	M(json.Unmarshal(claudeJSONBytes, &claudeJSON))
+	projects, ok := claudeJSON["projects"].(map[string]any)
+	if !ok {
+		panic(fmt.Errorf("\"projects\" key in .claude.json is expected to be an object but is %T: %+v\n", claudeJSON["projects"], claudeJSON["projects"]))
+	}
+	// Mask other projects
+	claudeJSON["projects"] = map[string]any{
+		"/w": projects["/root/vibing"],
+	}
+	claudeJSONBytes = M2(json.Marshal(claudeJSON))
+	claudeFile := dag.File(".claude.json", string(claudeJSONBytes))
+
+	claudeCreds := dag.Host().File("/tmp/claude-credentials.json")
 
 	ctr := dag.Container().From("node:24.1.0-slim@sha256:5ae787590295f944e7dc200bf54861bac09bf21b5fdb4c9b97aee7781b6d95a2").
 		WithMountedCache("$HOME/.npm", dag.CacheVolume("npm"), dagger.ContainerWithMountedCacheOpts{Expand: true}).
@@ -89,15 +121,13 @@ func main() {
 		// TODO: store claude-credentials.json in tmpfs
 		// FIXME: Expand doesn't expand $HOME neither in secret uri, nor target path
 		// WithMountedSecret("/root/.claude/.credentials.json", creds, dagger.ContainerWithMountedSecretOpts{Expand: true}).
-		WithMountedFile("$HOME/.claude.json", claudeFile, dagger.ContainerWithMountedFileOpts{Expand: true}).
-		WithMountedDirectory("$HOME/.claude", claudeState, dagger.ContainerWithMountedDirectoryOpts{Expand: true}).
+		WithMountedFile("/root/.claude.json", claudeFile).
+		// WithMountedDirectory("$HOME/.claude", claudeState, dagger.ContainerWithMountedDirectoryOpts{Expand: true}).
+		WithMountedFile("/root/.claude/.credentials.json", claudeCreds).
 		// Terminal(dagger.ContainerTerminalOpts{Cmd: []string{"/bin/bash"}})
 		Terminal(dagger.ContainerTerminalOpts{Cmd: claudeCmd})
 
-	_, err = ctr.Sync(ctx)
-	if err != nil {
-		panic(err)
-	}
+	M2(ctr.Sync(ctx))
 
 	/*
 		cmd := exec.Command("docker", "run", "-it", "--rm", "-v", "/tmp/claude-credentials.json:/root/.claude/.credentials.json", "cosmos:claude")
