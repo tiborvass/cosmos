@@ -67,6 +67,9 @@ func main() {
 		WithMountedCache("$HOME/.npm", dag.CacheVolume("npm"), dagger.ContainerWithMountedCacheOpts{Expand: true}).
 		WithExec(strings.Fields("npm install -g @anthropic-ai/claude-code")).
 		WithServiceBinding("coding-proxy", svc).
+		// TODO: git?
+		WithMountedDirectory("/w", dag.Host().Directory(".")).
+		WithWorkdir("/w").
 		WithEnvVariable("ANTHROPIC_BASE_URL", fmt.Sprintf("http://coding-proxy:%d", port)).
 		// TODO: store claude-credentials.json in tmpfs
 		// FIXME: Expand doesn't expand $HOME neither in secret uri, nor target path
