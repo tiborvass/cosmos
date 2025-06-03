@@ -138,7 +138,10 @@ func startProxy(addr string) *http.Server {
 					if _, ok := ev.AsAny().(anthropic.MessageStopEvent); ok {
 						for _, content := range msg.Content {
 							if content.Type == "tool_use" {
-								toolUseIDs[content.ID] = struct{}{}
+								// For some reason msg.ToolUseID is empty
+								toolUseID := content.ID
+								// TODO: locks
+								toolUseIDs[toolUseID] = struct{}{}
 								fmt.Printf("FOUND EVENT: %s: %v\n", event.Event, content.ID)
 							}
 						}
