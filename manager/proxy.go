@@ -66,7 +66,7 @@ return resp, nil
 }
 */
 
-func startProxy(addr string) {
+func startProxy(addr string) *http.Server {
 	log.Printf("Proxy listening on %s\n", addr)
 
 	var m sync.Mutex
@@ -110,9 +110,11 @@ func startProxy(addr string) {
 	// 	r.Host = target.Host // set Host header as expected by target
 	// }
 
-	if err := http.ListenAndServe(addr, proxy); err != nil {
-		panic(err)
-	}
+	s := &http.Server{Addr: addr, Handler: proxy}
+	go func() {
+		M(s.ListenAndServe())
+	}()
+	return s
 }
 
 func usage() {
@@ -121,19 +123,39 @@ func usage() {
 }
 
 func main() {
+	fmt.Println("hi from proxy")
+	defer fmt.Println("bye from proxy")
 	ctx := context.Background()
+	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+	defer func() {
+		if x := recover(); x != nil {
+			fmt.Fprintln(os.Stderr, x)
+		}
+		stop()
+	}()
+
+	cleanups := []func(){}
+
+	go func() {
+		<-ctx.Done()
+		for _, cleanup := range cleanups {
+			cleanup()
+		}
+	}()
+
 	codingAgent := os.Args[1]
 	if codingAgent != "claude" {
 		usage()
 		os.Exit(1)
 	}
-	// startProxy(":8080")
+
 	addr := ":8042"
 	l := M2(net.Listen("tcp", addr))
 	var (
 		conn net.Conn
 		err  error
 	)
+	fmt.Println("connecting to client")
 	maxRetries := 5
 	backoff := time.Second / 2
 	for range maxRetries {
@@ -145,18 +167,26 @@ func main() {
 		time.Sleep(backoff)
 		backoff *= 2
 	}
-	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
-	defer stop()
+	fmt.Println("connected to client")
 
-	go func() {
-		<-ctx.Done()
+	cleanups = append(cleanups, func() {
 		if conn != nil {
 			conn.Close()
 		}
-	}()
+	})
 
-	agentID := R(ctx, "docker run -dit --rm -v /tmp/claude-credentials.json:/root/.claude/.credentials.json cosmos-agent:claude")
+	proxy := startProxy(":8080")
+
+	cleanups = append(cleanups, func() {
+		fmt.Println("shutting down server")
+		M(proxy.Shutdown(context.Background()))
+	})
+
+	fmt.Println("proxy started")
+	agentID := R(ctx, "docker run -dit --rm --net container:%s -e ANTHROPIC_BASE_URL=http://localhost:8080 -v /tmp/claude-credentials.json:/root/.claude/.credentials.json cosmos-agent:claude", M2(os.Hostname()))
 	fmt.Println(agentID)
 	enc := json.NewEncoder(conn)
 	M(enc.Encode(agentID))
+	R(ctx, "docker wait %s", agentID)
+	time.Sleep(time.Second * 30)
 }
