@@ -8,8 +8,10 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"mime"
 	"net"
 	"net/http"
+	"net/http/httputil"
 	"os"
 	"os/signal"
 	"sync"
@@ -17,7 +19,8 @@ import (
 	"time"
 
 	"github.com/andybalholm/brotli"
-	"github.com/tiborvass/cosmos/manager/httputil"
+	"github.com/r3labs/sse"
+	"github.com/tiborvass/cosmos/ctxio"
 	. "github.com/tiborvass/cosmos/utils"
 )
 
@@ -25,35 +28,7 @@ const (
 	ANTHROPIC_BASE_DOMAIN = "api.anthropic.com"
 )
 
-var numRequests = 1
-
-// Handle CONNECT requests (HTTPS tunneling)
-// func handleConnect(w http.ResponseWriter, r *http.Request) {
-// 	// "Hijack" the connection
-// 	h, ok := w.(http.Hijacker)
-// 	if !ok {
-// 		http.Error(w, "Hijacking not supported", http.StatusInternalServerError)
-// 		return
-// 	}
-// 	clientConn, bufrw, err := h.Hijack()
-// 	if err != nil {
-// 		http.Error(w, err.Error(), http.StatusServiceUnavailable)
-// 		return
-// 	}
-// 	// Connect to the destination server
-// 	destConn, err := net.Dial("tcp", r.Host)
-// 	if err != nil {
-// 		bufrw.WriteString("HTTP/1.1 502 Bad Gateway\r\n\r\n")
-// 		bufrw.Flush()
-// 		clientConn.Close()
-// 		return
-// 	}
-// 	bufrw.WriteString("HTTP/1.1 200 Connection Established\r\n\r\n")
-// 	bufrw.Flush()
-// 	// Tunnel: copy bytes both ways
-// 	go io.Copy(destConn, clientConn)
-// 	go io.Copy(clientConn, destConn)
-// }
+var numRequests = 0
 
 func startProxy(addr string) *http.Server {
 	log.Printf("Proxy listening on %s\n", addr)
@@ -61,35 +36,96 @@ func startProxy(addr string) *http.Server {
 	var m sync.Mutex
 	proxy := &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
+			// One request at a time
+			// Unlock is in ModifyResponse
 			m.Lock()
-			// fmt.Printf("inp: %+v\n", pr.In)
-			// fmt.Println()
+			numRequests++
 			pr.Out.URL.Scheme = "https"
 			pr.Out.URL.Host = ANTHROPIC_BASE_DOMAIN
 			pr.Out.Host = ANTHROPIC_BASE_DOMAIN
 			reqDump := M2(httputil.DumpRequestOut(pr.Out, true))
-			log.Printf("===[REQUEST %d]===\n\n%s\n\n", numRequests, reqDump)
+			log.Printf("=== [REQUEST %d] ===\n\n%s\n\n", numRequests, reqDump)
 		},
-		ModifyResponse: func(resp *http.Response) error {
-			defer m.Unlock()
-			bodyReader := func(r io.ReadCloser) (io.ReadCloser, error) {
-				switch ce := resp.Header.Get("Content-Encoding"); ce {
-				case "br":
-					return io.NopCloser(brotli.NewReader(r)), nil
-				case "gzip":
-					return gzip.NewReader(r)
-				case "":
-					return r, nil
-				default:
-					return nil, fmt.Errorf("unhandled Content-Encoding %s", ce)
+		ModifyResponse: func(resp *http.Response) (rerr error) {
+			defer func() { rerr = Defer(rerr) }()
+
+			// TODO: better context ?
+			ctx := context.Background()
+
+			body := resp.Body
+
+			ce := resp.Header.Get("Content-Encoding")
+			// Since the proxy is already decompressing the stream, no need to recompress it for the agent and have them decompress it again
+			// So remove Content-Encoding, indicating an uncompressed stream.
+			resp.Header.Del("Content-Encoding")
+			switch ce {
+			case "br":
+				body = io.NopCloser(brotli.NewReader(body))
+			case "gzip":
+				var err error
+				body, err = gzip.NewReader(body)
+				if err != nil {
+					return err
 				}
-			}
-			respDump, err := httputil.DumpResponse(resp, true, bodyReader)
-			if err != nil {
-				return err
+			case "":
+			default:
+				return fmt.Errorf("unhandled Content-Encoding %s", ce)
 			}
 
-			log.Printf("===[RESPONSE %d]===\n\n%s\n\n", numRequests, respDump)
+			ct := resp.Header.Get("Content-Type")
+			fmt.Println("TOTO content-type", ct)
+			if ct != "" {
+				mediaType, params, err := mime.ParseMediaType(ct)
+				fmt.Println("QIQI", mediaType, params, err)
+				if err != nil {
+					return err
+				}
+				if charset, ok := params["charset"]; ok && charset != "utf-8" {
+					return fmt.Errorf("unhandled mime type params %q", params["charset"])
+				}
+				ct = mediaType
+			}
+
+			if ct != "text/event-stream" {
+				out := ctxio.NewReaderFanOut(ctx, body, 2)
+				var dupBody io.ReadCloser
+				resp.Body, dupBody = out.Readers[0], out.Readers[1]
+
+				fmt.Printf("=== RESPONSE [%d] ===\n\n", numRequests)
+				go func() {
+					defer fmt.Println("\n\nDONE RESPONSE\n")
+					defer m.Unlock()
+					io.Copy(os.Stdout, dupBody)
+				}()
+				return nil
+			}
+			fmt.Println("SSE")
+			sseReader := sse.NewEventStreamReader(body)
+			var pw *io.PipeWriter
+			resp.Body, pw = io.Pipe()
+
+			// TODO: context?
+			go func() {
+				defer m.Unlock()
+				for {
+					msg, err := sseReader.ReadEvent()
+					if err != nil {
+						pw.CloseWithError(err)
+						return
+					}
+					encodingBase64 := false
+					event, err := processEvent(msg, encodingBase64)
+					if err != nil {
+						panic(err)
+					}
+					fmt.Printf("FOUND EVENT: %s: %s\n", event.Event, event.Data)
+					_, err = pw.Write(msg)
+					if err != nil {
+						panic(err)
+					}
+				}
+			}()
+
 			return nil
 		},
 	}
