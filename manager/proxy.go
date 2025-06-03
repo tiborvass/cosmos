@@ -4,6 +4,7 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -112,7 +113,9 @@ func startProxy(addr string) *http.Server {
 
 	s := &http.Server{Addr: addr, Handler: proxy}
 	go func() {
-		M(s.ListenAndServe())
+		if err := s.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			panic(err)
+		}
 	}()
 	return s
 }
@@ -179,14 +182,16 @@ func main() {
 
 	cleanups = append(cleanups, func() {
 		fmt.Println("shutting down server")
-		M(proxy.Shutdown(context.Background()))
+		if err := proxy.Shutdown(context.Background()); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			panic(err)
+		}
 	})
 
 	fmt.Println("proxy started")
-	agentID := R(ctx, "docker run -dit --rm --net container:%s -e ANTHROPIC_BASE_URL=http://localhost:8080 -v /tmp/claude-credentials.json:/root/.claude/.credentials.json cosmos-agent:claude", M2(os.Hostname()))
+	agentID := R(ctx, "docker run --init -dit --rm --net container:%s -e ANTHROPIC_BASE_URL=http://localhost:8080 -v /tmp/claude-credentials.json:/root/.claude/.credentials.json -v /tmp/claude.json:/root/.claude.json -w /root/vibing cosmos-agent:claude", M2(os.Hostname()))
 	fmt.Println(agentID)
 	enc := json.NewEncoder(conn)
 	M(enc.Encode(agentID))
+	fmt.Println("waiting")
 	R(ctx, "docker wait %s", agentID)
-	time.Sleep(time.Second * 30)
 }

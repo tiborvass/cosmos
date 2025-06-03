@@ -51,7 +51,7 @@ func main() {
 	// claudeCreds := M2(os.ReadFile("/tmp/claude-credentials.json"))
 
 	workdir := M2(os.Getwd())
-	args := strings.Fields(fmt.Sprintf("docker run -d -p 8042 -v %s:/src -v /tmp/claude.json:/tmp/claude.json -v /tmp/claude-credentials.json:/tmp/claude-credentials.json -v /var/run/docker.sock:/var/run/docker.sock cosmos-manager claude", workdir))
+	args := strings.Fields(fmt.Sprintf("docker run -d --init --rm -p 8042 -v %s:/src -v /tmp/claude.json:/tmp/claude.json -v /tmp/claude-credentials.json:/tmp/claude-credentials.json -v /var/run/docker.sock:/var/run/docker.sock cosmos-manager claude", workdir))
 	args = append(args, os.Args[2:]...)
 
 	managerID := RS(ctx, args)
@@ -86,7 +86,6 @@ func main() {
 	if err != nil && !errors.Is(err, io.EOF) {
 		panic(err)
 	}
-	time.Sleep(time.Second * 30)
 	fmt.Println("agent", agentID)
 
 	cmd := exec.CommandContext(ctx, "docker", "attach", agentID)
