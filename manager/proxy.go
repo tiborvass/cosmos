@@ -21,51 +21,39 @@ import (
 	. "github.com/tiborvass/cosmos/utils"
 )
 
-var numRequests int
+const (
+	ANTHROPIC_BASE_DOMAIN = "api.anthropic.com"
+)
 
-/*
-type debugTransport struct {
-	sync.Mutex
-}
+var numRequests = 1
 
-func (t *debugTransport) RoundTrip(r *http.Request) (*http.Response, error) {
-	// Make requests sequential for now to make it easier to debug.
-	t.Lock()
-	defer t.Unlock()
-	numRequests++
-
-	reqDump, err := httputil.DumpRequestOut(r, true)
-	if err != nil {
-		return nil, err
-	}
-	log.Printf("===[REQUEST %d]===\n\n%s\n\n", numRequests, reqDump)
-
-	resp, err := http.DefaultTransport.RoundTrip(r)
-	if err != nil {
-		return nil, err
-	}
-	bodyReader := func(r io.ReadCloser) (io.ReadCloser, error) {
-		switch ce := resp.Header.Get("Content-Encoding"); ce {
-		case "br":
-			return io.NopCloser(brotli.NewReader(r)), nil
-		case "gzip":
-			return gzip.NewReader(r)
-		case "":
-			return r, nil
-		default:
-			return nil, fmt.Errorf("unhandled Content-Encoding %s", ce)
-		}
-	}
-
-	respDump, err := httputil.DumpResponse(resp, true, bodyReader)
-	if err != nil {
-		return nil, err
-	}
-
-	log.Printf("===[RESPONSE %d]===\n\n%s\n\n", numRequests, respDump)
-return resp, nil
-}
-*/
+// Handle CONNECT requests (HTTPS tunneling)
+// func handleConnect(w http.ResponseWriter, r *http.Request) {
+// 	// "Hijack" the connection
+// 	h, ok := w.(http.Hijacker)
+// 	if !ok {
+// 		http.Error(w, "Hijacking not supported", http.StatusInternalServerError)
+// 		return
+// 	}
+// 	clientConn, bufrw, err := h.Hijack()
+// 	if err != nil {
+// 		http.Error(w, err.Error(), http.StatusServiceUnavailable)
+// 		return
+// 	}
+// 	// Connect to the destination server
+// 	destConn, err := net.Dial("tcp", r.Host)
+// 	if err != nil {
+// 		bufrw.WriteString("HTTP/1.1 502 Bad Gateway\r\n\r\n")
+// 		bufrw.Flush()
+// 		clientConn.Close()
+// 		return
+// 	}
+// 	bufrw.WriteString("HTTP/1.1 200 Connection Established\r\n\r\n")
+// 	bufrw.Flush()
+// 	// Tunnel: copy bytes both ways
+// 	go io.Copy(destConn, clientConn)
+// 	go io.Copy(clientConn, destConn)
+// }
 
 func startProxy(addr string) *http.Server {
 	log.Printf("Proxy listening on %s\n", addr)
@@ -74,11 +62,12 @@ func startProxy(addr string) *http.Server {
 	proxy := &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			m.Lock()
-			fmt.Printf("inp: %+v\n", pr.In)
-			fmt.Println()
-			fmt.Printf("out: %+v\n", pr.Out)
-			fmt.Println()
-			fmt.Println()
+			// fmt.Printf("inp: %+v\n", pr.In)
+			// fmt.Println()
+			pr.Out.URL.Scheme = "https"
+			pr.Out.URL.Host = ANTHROPIC_BASE_DOMAIN
+			reqDump := M2(httputil.DumpRequestOut(pr.Out, true))
+			log.Printf("===[REQUEST %d]===\n\n%s\n\n", numRequests, reqDump)
 		},
 		ModifyResponse: func(resp *http.Response) error {
 			defer m.Unlock()
@@ -104,19 +93,26 @@ func startProxy(addr string) *http.Server {
 		},
 	}
 
-	// proxy.Transport = new(debugTransport)
-	// d := proxy.Director
-	// proxy.Director = func(r *http.Request) {
-	// 	d(r) // call default director
-	// 	r.Host = target.Host // set Host header as expected by target
-	// }
+	s := &http.Server{Addr: addr}
 
-	s := &http.Server{Addr: addr, Handler: proxy}
+	handler := func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodConnect {
+			w.WriteHeader(http.StatusBadGateway)
+			s.Shutdown(context.Background())
+			// handleConnect(w, r)
+			return
+		}
+		proxy.ServeHTTP(w, r)
+	}
+
+	s.Handler = http.HandlerFunc(handler)
+
 	go func() {
 		if err := s.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			panic(err)
 		}
 	}()
+
 	return s
 }
 
@@ -188,7 +184,7 @@ func main() {
 	})
 
 	fmt.Println("proxy started")
-	agentID := R(ctx, "docker run --init -dit --rm --net container:%s -e ANTHROPIC_BASE_URL=http://localhost:8080 -v /tmp/claude-credentials.json:/root/.claude/.credentials.json -v /tmp/claude.json:/root/.claude.json -w /root/vibing cosmos-agent:claude", M2(os.Hostname()))
+	agentID := R(ctx, "docker run --init -dit --rm --net container:%s -e CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 -e ANTHROPIC_BASE_URL=http://localhost:8080 -v /tmp/claude.state/.credentials.json:/root/.claude/.credentials.json -v /tmp/claude.json:/root/.claude.json -w /root/vibing cosmos-agent:claude", M2(os.Hostname()))
 	fmt.Println(agentID)
 	enc := json.NewEncoder(conn)
 	M(enc.Encode(agentID))

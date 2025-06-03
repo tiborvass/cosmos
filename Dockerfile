@@ -17,7 +17,8 @@ ARG DOCKER_VERSION=28.2.2
 COPY --from=xx / /
 RUN cd /tmp && wget -O- https://download.docker.com/linux/static/stable/$(xx-info march)/docker-${DOCKER_VERSION}.tgz | tar xz docker/docker
 
-FROM scratch AS manager
+FROM alpine AS manager
+RUN apk add -U ca-certificates
 COPY --from=builder /tmp/cosmos-manager .
 COPY --from=docker-cli /tmp/docker/docker /usr/bin/docker
 EXPOSE 8080
