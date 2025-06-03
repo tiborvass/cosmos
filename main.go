@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -10,135 +9,241 @@ import (
 	"os/exec"
 	"strings"
 	"syscall"
-
-	"dagger.io/dagger"
+	"time"
+	"unsafe"
 )
 
-var dag *dagger.Client
-
-func M2[T any](v T, err error) T {
-	if err != nil {
-		panic(err)
-	}
-	return v
-}
-
-func M(err error) {
-	if err != nil {
-		panic(err)
-	}
+func isatty() bool {
+	fd := os.Stdin.Fd()
+	var termios syscall.Termios
+	_, _, err := syscall.Syscall6(syscall.SYS_IOCTL, uintptr(fd), syscall.TCGETS, uintptr(unsafe.Pointer(&termios)), 0, 0, 0)
+	return err == 0
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: cosmos <coding-agent> [<coding-agent-option>...]")
-	fmt.Fprintln(os.Stderr, "coding-agent: only \"claude\" is currently supported")
+	fmt.Fprintln(os.Stderr, "usage: cosmos <action> [args...]")
+	fmt.Fprintln(os.Stderr, "actions:")
+	fmt.Fprintln(os.Stderr, "  start <image> [args...]  - Start a new container")
+	fmt.Fprintln(os.Stderr, "  stop <container_id>      - Stop a container")
+	fmt.Fprintln(os.Stderr, "  restart <container_id>   - Restart a container")
+	fmt.Fprintln(os.Stderr, "  status                   - Check proxy status")
+	fmt.Fprintln(os.Stderr, "  stop-proxy              - Stop the cosmos proxy")
+}
+
+func spawnProxy() (string, error) {
+	// Check if proxy container already exists
+	checkCmd := exec.Command("docker", "ps", "-a", "--filter", "name=cosmos-proxy", "--format", "{{.ID}}")
+	output, err := checkCmd.Output()
+	if err == nil && len(strings.TrimSpace(string(output))) > 0 {
+		containerID := strings.TrimSpace(string(output))
+		// Check if it's running
+		statusCmd := exec.Command("docker", "inspect", "--format", "{{.State.Running}}", containerID)
+		statusOutput, err := statusCmd.Output()
+		if err == nil && strings.TrimSpace(string(statusOutput)) == "true" {
+			fmt.Fprintf(os.Stderr, "Using existing proxy container: %s\n", containerID[:12])
+			return containerID, nil
+		}
+		// Start existing container
+		fmt.Fprintf(os.Stderr, "Starting existing proxy container: %s\n", containerID[:12])
+		startCmd := exec.Command("docker", "start", containerID)
+		if err := startCmd.Run(); err == nil {
+			return containerID, nil
+		}
+		// If start fails, remove and create new
+		exec.Command("docker", "rm", containerID).Run()
+	}
+
+	fmt.Fprintf(os.Stderr, "Spawning new coding-proxy container...\n")
+
+	cmd := exec.Command("docker", "run", "-d",
+		"--name", "cosmos-proxy",
+		"--network", "cosmos-net", 
+		"-v", "/var/run/docker.sock:/var/run/docker.sock",
+		"-p", "8080:8080",
+		"tiborvass/coding-proxy")
+
+	output, err = cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("failed to spawn proxy container: %w", err)
+	}
+
+	containerID := strings.TrimSpace(string(output))
+	fmt.Fprintf(os.Stderr, "Proxy container started: %s\n", containerID[:12])
+
+	for i := 0; i < 10; i++ {
+		time.Sleep(1 * time.Second)
+		resp, err := http.Get("http://localhost:8080/")
+		if err == nil {
+			resp.Body.Close()
+			break
+		}
+		if i == 9 {
+			return "", fmt.Errorf("proxy container not ready after 10 seconds")
+		}
+	}
+
+	return containerID, nil
+}
+
+func sendCommand(command string) (string, error) {
+	resp, err := http.Post("http://localhost:8080/container", "application/json", strings.NewReader(command))
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+
+	return string(body), nil
 }
 
 func main() {
-	if _, ok := os.LookupEnv("DAGGER_SESSION_TOKEN"); !ok {
-		args := make([]string, len(os.Args)+2)
-		var err error
-		args[0], err = exec.LookPath("dagger")
-		if err != nil {
-			panic("TODO: auto download dagger")
-		}
-		args[1] = "run"
-		copy(args[2:], os.Args)
-		env := os.Environ()
-		// env = append(env, "DAGGER_LOG_STDERR=dagger.log")
-		err = syscall.Exec(args[0], args, env)
-		panic(fmt.Errorf("unexpected reexec failure %v: %w", args, err))
-	}
-
 	if len(os.Args) <= 1 {
 		usage()
 		return
 	}
-	codingAgent := os.Args[1]
-	if codingAgent != "claude" {
-		usage()
-		return
-	}
-	// remainder args
-	args := os.Args[2:]
-	claudeCmd := []string{"/usr/local/bin/claude"}
-	claudeCmd = append(claudeCmd, args...)
 
-	ctx := context.Background()
-
-	fmt.Fprintf(os.Stderr, "Loading sandbox for %s...\n", codingAgent)
-
-	var err error
-	dag, err = dagger.Connect(context.Background(), dagger.WithLogOutput(os.Stderr))
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error starting dagger: %v\n", err)
-		os.Exit(1)
-	}
-	defer dag.Close()
-
-	// TODO: why do we need withExposedPort ? Can't we just rely on the base image's EXPOSE ?
-	svc := dag.Container().From("tiborvass/coding-proxy").WithExposedPort(8080).AsService(dagger.ContainerAsServiceOpts{ExperimentalPrivilegedNesting: true})
-	svc = M2(dag.Host().Tunnel(svc).Start(ctx))
-	// svc.Endpoint(ctx, dagger.ServiceEndpointOpts{})
-	ports := M2(svc.Ports(ctx))
-	if len(ports) != 1 {
-		panic("expected to find exposed ports for coding-proxy")
-	}
-	port := M2(ports[0].Port(ctx))
-
-	host := M2(svc.Hostname(ctx))
-	resp := M2(http.Get(fmt.Sprintf("http://%s:%d", host, port)))
-	defer resp.Body.Close()
-	io.Copy(os.Stdout, resp.Body)
-	return
-
-	// creds := dag.Host().SetSecretFile("claude-credentials", "/tmp/claude-credentials.json")
-	// creds := dag.Secret("file:///tmp/claude-credentials.json")
-	claudeJSONBytes := []byte(M2(dag.Host().File("/tmp/claude.json").Contents(ctx)))
-	var claudeJSON map[string]any
-	M(json.Unmarshal(claudeJSONBytes, &claudeJSON))
-	projects, ok := claudeJSON["projects"].(map[string]any)
-	if !ok {
-		panic(fmt.Errorf("\"projects\" key in .claude.json is expected to be an object but is %T: %+v\n", claudeJSON["projects"], claudeJSON["projects"]))
-	}
-	// Mask other projects
-	claudeJSON["projects"] = map[string]any{
-		"/w": projects["/root/vibing"],
-	}
-	claudeJSONBytes = M2(json.Marshal(claudeJSON))
-	claudeFile := dag.File(".claude.json", string(claudeJSONBytes))
-
-	claudeCreds := dag.Host().File("/tmp/claude-credentials.json")
-
-	ctr := dag.Container().From("node:24.1.0-slim@sha256:5ae787590295f944e7dc200bf54861bac09bf21b5fdb4c9b97aee7781b6d95a2").
-		WithMountedCache("$HOME/.npm", dag.CacheVolume("npm"), dagger.ContainerWithMountedCacheOpts{Expand: true}).
-		WithExec(strings.Fields("npm install -g @anthropic-ai/claude-code")).
-		WithServiceBinding("coding-proxy", svc).
-		// TODO: git?
-		WithMountedDirectory("/w", dag.Host().Directory(".")).
-		WithWorkdir("/w").
-		WithEnvVariable("ANTHROPIC_BASE_URL", fmt.Sprintf("http://coding-proxy:%d", port)).
-		// TODO: store claude-credentials.json in tmpfs
-		// FIXME: Expand doesn't expand $HOME neither in secret uri, nor target path
-		// WithMountedSecret("/root/.claude/.credentials.json", creds, dagger.ContainerWithMountedSecretOpts{Expand: true}).
-		WithMountedFile("/root/.claude.json", claudeFile).
-		// WithMountedDirectory("$HOME/.claude", claudeState, dagger.ContainerWithMountedDirectoryOpts{Expand: true}).
-		WithMountedFile("/root/.claude/.credentials.json", claudeCreds).
-		// Terminal(dagger.ContainerTerminalOpts{Cmd: []string{"/bin/bash"}})
-		Terminal(dagger.ContainerTerminalOpts{Cmd: claudeCmd})
-
-	M2(ctr.Sync(ctx))
-
-	/*
-		cmd := exec.Command("docker", "run", "-it", "--rm", "-v", "/tmp/claude-credentials.json:/root/.claude/.credentials.json", "cosmos:claude")
-
-		cmd.Args = append(cmd.Args, args...)
-		// syscall.Exec(cmd.Args[0], cmd.Args, os.Environ())
-		cmd.Stdin = os.Stdin
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-		if err := cmd.Start(); err != nil {
-			panic(err)
+	action := os.Args[1]
+	
+	switch action {
+	case "start":
+		if len(os.Args) < 3 {
+			fmt.Fprintf(os.Stderr, "usage: cosmos start <image> [args...]\n")
+			return
 		}
-	*/
+		
+		if err := exec.Command("docker", "network", "create", "cosmos-net").Run(); err != nil {
+			// Network might already exist, check if we can connect to docker
+			if checkErr := exec.Command("docker", "version").Run(); checkErr != nil {
+				fmt.Fprintf(os.Stderr, "Docker not available: %v\n", checkErr)
+				os.Exit(1)
+			}
+		}
+		
+		// Try to use existing proxy, spawn new one if needed
+		_, err := http.Get("http://localhost:8080/")
+		if err != nil {
+			_, err := spawnProxy()
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error spawning proxy: %v\n", err)
+				os.Exit(1)
+			}
+		}
+
+		image := os.Args[2]
+		args := os.Args[3:]
+		
+		cmdJSON := map[string]any{
+			"action": "start",
+			"image":  image,
+			"args":   args,
+		}
+		cmdBytes, _ := json.Marshal(cmdJSON)
+		
+		containerID, err := sendCommand(string(cmdBytes))
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error starting container: %v\n", err)
+			os.Exit(1)
+		}
+		
+		fmt.Fprintf(os.Stderr, "Container started: %s\n", containerID[:12])
+		
+		// Check if we have a TTY available and exec into container
+		var execArgs []string
+		if isatty() {
+			execArgs = []string{"exec", "-ti", strings.TrimSpace(containerID), "/bin/bash"}
+		} else {
+			execArgs = []string{"exec", "-i", strings.TrimSpace(containerID), "/bin/bash"}
+		}
+		
+		execCmd := exec.Command("docker", execArgs...)
+		execCmd.Stdin = os.Stdin
+		execCmd.Stdout = os.Stdout
+		execCmd.Stderr = os.Stderr
+		if err := execCmd.Run(); err != nil {
+			// Try with /bin/sh if bash fails
+			if isatty() {
+				execArgs = []string{"exec", "-ti", strings.TrimSpace(containerID), "/bin/sh"}
+			} else {
+				execArgs = []string{"exec", "-i", strings.TrimSpace(containerID), "/bin/sh"}
+			}
+			execCmd = exec.Command("docker", execArgs...)
+			execCmd.Stdin = os.Stdin
+			execCmd.Stdout = os.Stdout
+			execCmd.Stderr = os.Stderr
+			if err := execCmd.Run(); err != nil {
+				fmt.Fprintf(os.Stderr, "Failed to exec into container: %v\n", err)
+			}
+		}
+
+	case "stop":
+		if len(os.Args) < 3 {
+			fmt.Fprintf(os.Stderr, "usage: cosmos stop <container_id>\n")
+			return
+		}
+		
+		containerID := os.Args[2]
+		cmdJSON := map[string]any{
+			"action": "stop",
+			"container_id": containerID,
+		}
+		cmdBytes, _ := json.Marshal(cmdJSON)
+		
+		_, err := sendCommand(string(cmdBytes))
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error stopping container: %v\n", err)
+			os.Exit(1)
+		}
+		
+		fmt.Fprintf(os.Stderr, "Container stopped: %s\n", containerID)
+
+	case "restart":
+		if len(os.Args) < 3 {
+			fmt.Fprintf(os.Stderr, "usage: cosmos restart <container_id>\n")
+			return
+		}
+		
+		containerID := os.Args[2]
+		cmdJSON := map[string]any{
+			"action": "restart",
+			"container_id": containerID,
+		}
+		cmdBytes, _ := json.Marshal(cmdJSON)
+		
+		_, err := sendCommand(string(cmdBytes))
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error restarting container: %v\n", err)
+			os.Exit(1)
+		}
+		
+		fmt.Fprintf(os.Stderr, "Container restarted: %s\n", containerID)
+
+	case "status":
+		resp, err := http.Get("http://localhost:8080/")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Proxy not running\n")
+			os.Exit(1)
+		}
+		resp.Body.Close()
+		fmt.Fprintf(os.Stderr, "Proxy running on :8080\n")
+
+	case "stop-proxy":
+		cmd := exec.Command("docker", "stop", "cosmos-proxy")
+		if err := cmd.Run(); err != nil {
+			fmt.Fprintf(os.Stderr, "Error stopping proxy: %v\n", err)
+			os.Exit(1)
+		}
+		cmd = exec.Command("docker", "rm", "cosmos-proxy")
+		if err := cmd.Run(); err != nil {
+			fmt.Fprintf(os.Stderr, "Error removing proxy: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Fprintf(os.Stderr, "Proxy stopped and removed\n")
+
+	default:
+		usage()
+	}
 }
