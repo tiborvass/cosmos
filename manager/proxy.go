@@ -2,14 +2,22 @@ package main
 
 import (
 	"compress/gzip"
+	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
+	"os"
+	"os/signal"
 	"sync"
+	"syscall"
+	"time"
 
 	"github.com/andybalholm/brotli"
-	"github.com/tiborvass/cosmos/coding-proxy/httputil"
+	"github.com/tiborvass/cosmos/manager/httputil"
+	. "github.com/tiborvass/cosmos/utils"
 )
 
 var numRequests int
@@ -107,6 +115,48 @@ func startProxy(addr string) {
 	}
 }
 
+func usage() {
+	fmt.Fprintln(os.Stderr, "usage: cosmos-manager <coding-agent>")
+	fmt.Fprintln(os.Stderr, "coding-agent: only \"claude\" is currently supported")
+}
+
 func main() {
-	startProxy(":8080")
+	ctx := context.Background()
+	codingAgent := os.Args[1]
+	if codingAgent != "claude" {
+		usage()
+		os.Exit(1)
+	}
+	// startProxy(":8080")
+	addr := ":8042"
+	l := M2(net.Listen("tcp", addr))
+	var (
+		conn net.Conn
+		err  error
+	)
+	maxRetries := 5
+	backoff := time.Second / 2
+	for range maxRetries {
+		conn, err = l.Accept()
+		if err == nil {
+			break
+		}
+		fmt.Fprintf(os.Stderr, "unable to listen on %s: %v, retrying in %v...\n", addr, err, backoff)
+		time.Sleep(backoff)
+		backoff *= 2
+	}
+	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	go func() {
+		<-ctx.Done()
+		if conn != nil {
+			conn.Close()
+		}
+	}()
+
+	agentID := R(ctx, "docker run -dit --rm -v /tmp/claude-credentials.json:/root/.claude/.credentials.json cosmos-agent:claude")
+	fmt.Println(agentID)
+	enc := json.NewEncoder(conn)
+	M(enc.Encode(agentID))
 }

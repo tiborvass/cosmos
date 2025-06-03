@@ -3,31 +3,17 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
-	"net/http"
+	"net"
 	"os"
 	"os/exec"
 	"strings"
-	"syscall"
+	"time"
 
-	"dagger.io/dagger"
+	. "github.com/tiborvass/cosmos/utils"
 )
-
-var dag *dagger.Client
-
-func M2[T any](v T, err error) T {
-	if err != nil {
-		panic(err)
-	}
-	return v
-}
-
-func M(err error) {
-	if err != nil {
-		panic(err)
-	}
-}
 
 func usage() {
 	fmt.Fprintln(os.Stderr, "usage: cosmos <coding-agent> [<coding-agent-option>...]")
@@ -35,66 +21,20 @@ func usage() {
 }
 
 func main() {
-	if _, ok := os.LookupEnv("DAGGER_SESSION_TOKEN"); !ok {
-		args := make([]string, len(os.Args)+2)
-		var err error
-		args[0], err = exec.LookPath("dagger")
-		if err != nil {
-			panic("TODO: auto download dagger")
-		}
-		args[1] = "run"
-		copy(args[2:], os.Args)
-		env := os.Environ()
-		// env = append(env, "DAGGER_LOG_STDERR=dagger.log")
-		err = syscall.Exec(args[0], args, env)
-		panic(fmt.Errorf("unexpected reexec failure %v: %w", args, err))
-	}
-
 	if len(os.Args) <= 1 {
 		usage()
-		return
+		os.Exit(1)
 	}
 	codingAgent := os.Args[1]
 	if codingAgent != "claude" {
 		usage()
-		return
+		os.Exit(1)
 	}
-	// remainder args
-	args := os.Args[2:]
-	claudeCmd := []string{"/usr/local/bin/claude"}
-	claudeCmd = append(claudeCmd, args...)
 
 	ctx := context.Background()
 
-	fmt.Fprintf(os.Stderr, "Loading sandbox for %s...\n", codingAgent)
-
-	var err error
-	dag, err = dagger.Connect(context.Background(), dagger.WithLogOutput(os.Stderr))
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error starting dagger: %v\n", err)
-		os.Exit(1)
-	}
-	defer dag.Close()
-
-	// TODO: why do we need withExposedPort ? Can't we just rely on the base image's EXPOSE ?
-	svc := dag.Container().From("tiborvass/coding-proxy").WithExposedPort(8080).AsService(dagger.ContainerAsServiceOpts{ExperimentalPrivilegedNesting: true})
-	svc = M2(dag.Host().Tunnel(svc).Start(ctx))
-	// svc.Endpoint(ctx, dagger.ServiceEndpointOpts{})
-	ports := M2(svc.Ports(ctx))
-	if len(ports) != 1 {
-		panic("expected to find exposed ports for coding-proxy")
-	}
-	port := M2(ports[0].Port(ctx))
-
-	host := M2(svc.Hostname(ctx))
-	resp := M2(http.Get(fmt.Sprintf("http://%s:%d", host, port)))
-	defer resp.Body.Close()
-	io.Copy(os.Stdout, resp.Body)
-	return
-
-	// creds := dag.Host().SetSecretFile("claude-credentials", "/tmp/claude-credentials.json")
-	// creds := dag.Secret("file:///tmp/claude-credentials.json")
-	claudeJSONBytes := []byte(M2(dag.Host().File("/tmp/claude.json").Contents(ctx)))
+	// claudeJSONBytes := []byte(M2(dag.Host().File("/tmp/claude.json").Contents(ctx)))
+	claudeJSONBytes := M2(os.ReadFile("/tmp/claude.json"))
 	var claudeJSON map[string]any
 	M(json.Unmarshal(claudeJSONBytes, &claudeJSON))
 	projects, ok := claudeJSON["projects"].(map[string]any)
@@ -106,28 +46,71 @@ func main() {
 		"/w": projects["/root/vibing"],
 	}
 	claudeJSONBytes = M2(json.Marshal(claudeJSON))
-	claudeFile := dag.File(".claude.json", string(claudeJSONBytes))
+	// claudeFile := dag.File(".claude.json", string(claudeJSONBytes))
 
-	claudeCreds := dag.Host().File("/tmp/claude-credentials.json")
+	// claudeCreds := M2(os.ReadFile("/tmp/claude-credentials.json"))
 
-	ctr := dag.Container().From("node:24.1.0-slim@sha256:5ae787590295f944e7dc200bf54861bac09bf21b5fdb4c9b97aee7781b6d95a2").
-		WithMountedCache("$HOME/.npm", dag.CacheVolume("npm"), dagger.ContainerWithMountedCacheOpts{Expand: true}).
-		WithExec(strings.Fields("npm install -g @anthropic-ai/claude-code")).
-		WithServiceBinding("coding-proxy", svc).
-		// TODO: git?
-		WithMountedDirectory("/w", dag.Host().Directory(".")).
-		WithWorkdir("/w").
-		WithEnvVariable("ANTHROPIC_BASE_URL", fmt.Sprintf("http://coding-proxy:%d", port)).
-		// TODO: store claude-credentials.json in tmpfs
-		// FIXME: Expand doesn't expand $HOME neither in secret uri, nor target path
-		// WithMountedSecret("/root/.claude/.credentials.json", creds, dagger.ContainerWithMountedSecretOpts{Expand: true}).
-		WithMountedFile("/root/.claude.json", claudeFile).
-		// WithMountedDirectory("$HOME/.claude", claudeState, dagger.ContainerWithMountedDirectoryOpts{Expand: true}).
-		WithMountedFile("/root/.claude/.credentials.json", claudeCreds).
-		// Terminal(dagger.ContainerTerminalOpts{Cmd: []string{"/bin/bash"}})
-		Terminal(dagger.ContainerTerminalOpts{Cmd: claudeCmd})
+	workdir := M2(os.Getwd())
+	args := strings.Fields(fmt.Sprintf("docker run -d --rm -p 8042 -v %s:/src -v /tmp/claude.json:/tmp/claude.json -v /tmp/claude-credentials.json:/tmp/claude-credentials.json -v /var/run/docker.sock:/var/run/docker.sock cosmos-manager claude", workdir))
+	args = append(args, os.Args[2:]...)
 
-	M2(ctr.Sync(ctx))
+	managerID := RS(ctx, args)
+	defer exec.Command("docker", "stop", managerID).Run()
+
+	addr := R(ctx, "docker port %s 8042/tcp", managerID)
+
+	dialer := &net.Dialer{}
+	var (
+		err  error
+		conn net.Conn
+	)
+	maxRetries := 5
+	backoff := time.Second / 2
+	for range maxRetries {
+		conn, err = dialer.DialContext(ctx, "tcp", addr)
+		if err == nil {
+			break
+		}
+		fmt.Fprintf(os.Stderr, "unable to connect to cosmos-manager (%s %s): %v, retrying in %v...\n", managerID, addr, err, backoff)
+		time.Sleep(backoff)
+		backoff *= 2
+	}
+	if err != nil {
+		panic(fmt.Errorf("failed to connect after %d retries: %v", maxRetries, err))
+	}
+	var agentID string
+	d := json.NewDecoder(conn)
+	err = d.Decode(&agentID)
+	if err != nil && !errors.Is(err, io.EOF) {
+		panic(err)
+	}
+
+	cmd := exec.CommandContext(ctx, "docker", "attach", agentID)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		fmt.Println(agentID)
+	}
+
+	// ctr := dag.Container().From("node:24.1.0-slim@sha256:5ae787590295f944e7dc200bf54861bac09bf21b5fdb4c9b97aee7781b6d95a2").
+	// 	WithMountedCache("$HOME/.npm", dag.CacheVolume("npm"), dagger.ContainerWithMountedCacheOpts{Expand: true}).
+	// 	WithExec(strings.Fields("npm install -g @anthropic-ai/claude-code")).
+	// 	WithServiceBinding("coding-proxy", svc).
+	// 	// TODO: git?
+	// 	WithMountedDirectory("/w", dag.Host().Directory(".")).
+	// 	WithWorkdir("/w").
+	// 	WithEnvVariable("ANTHROPIC_BASE_URL", fmt.Sprintf("http://coding-proxy:%d", port)).
+	// 	// TODO: store claude-credentials.json in tmpfs
+	// 	// FIXME: Expand doesn't expand $HOME neither in secret uri, nor target path
+	// 	// WithMountedSecret("/root/.claude/.credentials.json", creds, dagger.ContainerWithMountedSecretOpts{Expand: true}).
+	// 	WithMountedFile("/root/.claude.json", claudeFile).
+	// 	// WithMountedDirectory("$HOME/.claude", claudeState, dagger.ContainerWithMountedDirectoryOpts{Expand: true}).
+	// 	WithMountedFile("/root/.claude/.credentials.json", claudeCreds).
+	// 	// Terminal(dagger.ContainerTerminalOpts{Cmd: []string{"/bin/bash"}})
+	// 	Terminal(dagger.ContainerTerminalOpts{Cmd: claudeCmd})
+
+	// M2(ctr.Sync(ctx))
 
 	/*
 		cmd := exec.Command("docker", "run", "-it", "--rm", "-v", "/tmp/claude-credentials.json:/root/.claude/.credentials.json", "cosmos:claude")
