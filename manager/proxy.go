@@ -14,6 +14,7 @@ import (
 	"net/http/httputil"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -32,21 +33,38 @@ var numRequests = 0
 func startProxy(addr string) *http.Server {
 	log.Printf("Proxy listening on %s\n", addr)
 
-	// var m sync.Mutex
+	var m sync.Mutex
 	proxy := &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
+			m.Lock()
+			// defer m.Unlock()
+
+			ctx := pr.In.Context()
+			body := io.NopCloser(pr.Out.Body)
 			// One request at a time
 			// Unlock is in ModifyResponse
-			// m.Lock()
 			numRequests++
+			log.Printf("=== [REQUEST %d] ===\n\n", numRequests)
+
 			pr.Out.URL.Scheme = "https"
 			pr.Out.URL.Host = ANTHROPIC_BASE_DOMAIN
 			pr.Out.Host = ANTHROPIC_BASE_DOMAIN
-			reqDump := M2(httputil.DumpRequestOut(pr.Out, true))
-			log.Printf("=== [REQUEST %d] ===\n\n%s\n\n", numRequests, reqDump)
+
+			rout := ctxio.NewReaderFanOut(ctx, body, 2)
+			var dupBody io.ReadCloser
+			pr.Out.Body, dupBody = rout.Readers[0], rout.Readers[1]
+
+			go func() {
+				defer rout.Close()
+				defer fmt.Println("\n\nDONE REQUEST\n\n")
+				io.Copy(os.Stdout, dupBody)
+			}()
+
 		},
 		ModifyResponse: func(resp *http.Response) (rerr error) {
 			defer func() { rerr = Defer(rerr) }()
+			// m.Lock()
+			// defer m.Unlock()
 
 			// TODO: better context ?
 			ctx := context.Background()
@@ -85,31 +103,29 @@ func startProxy(addr string) *http.Server {
 				ct = mediaType
 			}
 
-			if ct != "text/event-stream" {
-				out := ctxio.NewReaderFanOut(ctx, body, 2)
-				var dupBody io.ReadCloser
-				resp.Body, dupBody = out.Readers[0], out.Readers[1]
+			rout := ctxio.NewReaderFanOut(ctx, io.NopCloser(body), 2)
+			var dupBody io.ReadCloser
+			resp.Body, dupBody = rout.Readers[0], rout.Readers[1]
 
+			if ct != "text/event-stream" {
 				fmt.Printf("=== RESPONSE [%d] ===\n\n", numRequests)
 				go func() {
 					defer fmt.Println("\n\nDONE RESPONSE\n")
-					// defer m.Unlock()
+					defer m.Unlock()
 					io.Copy(os.Stdout, dupBody)
 				}()
 				return nil
 			}
 			fmt.Println("SSE")
-			sseReader := sse.NewEventStreamReader(body)
-			var pw *io.PipeWriter
-			resp.Body, pw = io.Pipe()
+			sseReader := sse.NewEventStreamReader(dupBody)
 
 			// TODO: context?
 			go func() {
-				// defer m.Unlock()
+				defer rout.Close()
+				defer m.Unlock()
 				for {
 					msg, err := sseReader.ReadEvent()
 					if err != nil {
-						pw.CloseWithError(err)
 						return
 					}
 					encodingBase64 := false
@@ -118,10 +134,6 @@ func startProxy(addr string) *http.Server {
 						panic(err)
 					}
 					fmt.Printf("FOUND EVENT: %s: %s\n", event.Event, event.Data)
-					_, err = pw.Write(msg)
-					if err != nil {
-						panic(err)
-					}
 				}
 			}()
 

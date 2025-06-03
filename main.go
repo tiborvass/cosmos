@@ -12,8 +12,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/docker/docker/client"
-	"github.com/docker/go-connections/nat"
 	. "github.com/tiborvass/cosmos/utils"
 )
 
@@ -60,29 +58,33 @@ func main() {
 	defer exec.Command("docker", "stop", managerID).Run()
 
 	// Discover host-side address for 8042/tcp
-	cli, err := client.NewClientWithOpts(
-		client.FromEnv,
-		client.WithAPIVersionNegotiation(),
-	)
-	if err != nil {
-		panic(err)
-	}
-	inspect, err := cli.ContainerInspect(ctx, managerID)
-	if err != nil {
-		panic(err)
-	}
-	bindings := inspect.NetworkSettings.Ports[nat.Port("8042/tcp")]
-	if len(bindings) == 0 {
-		panic("manager exposes no 8042/tcp binding")
-	}
-	hostIP := bindings[0].HostIP
-	if hostIP == "" {
-		hostIP = "127.0.0.1" // docker returns empty for all-interfaces; pick loopback
-	}
-	addr := net.JoinHostPort(hostIP, bindings[0].HostPort)
+	addr := R(ctx, "docker port %s 8042/tcp", managerID)
+	/*
+		cli, err := client.NewClientWithOpts(
+			client.FromEnv,
+			client.WithAPIVersionNegotiation(),
+		)
+		if err != nil {
+			panic(err)
+		}
+		inspect, err := cli.ContainerInspect(ctx, managerID)
+		if err != nil {
+			panic(err)
+		}
+		bindings := inspect.NetworkSettings.Ports[nat.Port("8042/tcp")]
+		if len(bindings) == 0 {
+			panic("manager exposes no 8042/tcp binding")
+		}
+		hostIP := bindings[0].HostIP
+		if hostIP == "" {
+			hostIP = "127.0.0.1" // docker returns empty for all-interfaces; pick loopback
+		}
+		addr := net.JoinHostPort(hostIP, bindings[0].HostPort)
+	*/
 
 	dialer := &net.Dialer{}
 	var (
+		err  error
 		conn net.Conn
 	)
 	fmt.Println("connecting to manager")
