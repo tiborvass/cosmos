@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/andybalholm/brotli"
+	anthropic "github.com/anthropics/anthropic-sdk-go"
 	"github.com/r3labs/sse"
 	"github.com/tiborvass/cosmos/ctxio"
 	. "github.com/tiborvass/cosmos/utils"
@@ -30,6 +31,8 @@ const (
 
 var numRequests = 0
 
+var toolUseIDs = map[string]struct{}{}
+
 func startProxy(addr string) *http.Server {
 	log.Printf("Proxy listening on %s\n", addr)
 
@@ -39,8 +42,8 @@ func startProxy(addr string) *http.Server {
 			m.Lock()
 			// defer m.Unlock()
 
-			ctx := pr.In.Context()
-			body := io.NopCloser(pr.Out.Body)
+			// ctx := pr.In.Context()
+			pr.Out.Body = io.NopCloser(io.TeeReader(pr.Out.Body, os.Stdout))
 			// One request at a time
 			// Unlock is in ModifyResponse
 			numRequests++
@@ -50,15 +53,15 @@ func startProxy(addr string) *http.Server {
 			pr.Out.URL.Host = ANTHROPIC_BASE_DOMAIN
 			pr.Out.Host = ANTHROPIC_BASE_DOMAIN
 
-			rout := ctxio.NewReaderFanOut(ctx, body, 2)
-			var dupBody io.ReadCloser
-			pr.Out.Body, dupBody = rout.Readers[0], rout.Readers[1]
+			// rout := ctxio.NewReaderFanOut(ctx, body, 2)
+			// var dupBody io.ReadCloser
+			// pr.Out.Body, dupBody = rout.Readers[0], rout.Readers[1]
 
-			go func() {
-				defer rout.Close()
-				defer fmt.Println("\n\nDONE REQUEST\n\n")
-				io.Copy(os.Stdout, dupBody)
-			}()
+			// go func() {
+			// 	defer rout.Close()
+			// 	defer fmt.Println("\n\nDONE REQUEST\n\n")
+			// 	io.Copy(os.Stdout, dupBody)
+			// }()
 
 		},
 		ModifyResponse: func(resp *http.Response) (rerr error) {
@@ -90,10 +93,8 @@ func startProxy(addr string) *http.Server {
 			}
 
 			ct := resp.Header.Get("Content-Type")
-			fmt.Println("TOTO content-type", ct)
 			if ct != "" {
 				mediaType, params, err := mime.ParseMediaType(ct)
-				fmt.Println("QIQI", mediaType, params, err)
 				if err != nil {
 					return err
 				}
@@ -116,24 +117,33 @@ func startProxy(addr string) *http.Server {
 				}()
 				return nil
 			}
-			fmt.Println("SSE")
+			fmt.Println("\n\nSSE\n")
 			sseReader := sse.NewEventStreamReader(dupBody)
 
 			// TODO: context?
 			go func() {
 				defer rout.Close()
 				defer m.Unlock()
+				encodingBase64 := false
+				msg := new(anthropic.Message)
 				for {
-					msg, err := sseReader.ReadEvent()
+					p, err := sseReader.ReadEvent()
 					if err != nil {
 						return
 					}
-					encodingBase64 := false
-					event, err := processEvent(msg, encodingBase64)
-					if err != nil {
-						panic(err)
+					event := M2(processEvent(p, encodingBase64))
+					var ev anthropic.MessageStreamEventUnion
+					M(json.Unmarshal(event.Data, &ev))
+					M(msg.Accumulate(ev))
+					if _, ok := ev.AsAny().(anthropic.MessageStopEvent); ok {
+						for _, content := range msg.Content {
+							if content.Type == "tool_use" {
+								toolUseIDs[content.ID] = struct{}{}
+								fmt.Printf("FOUND EVENT: %s: %v\n", event.Event, content.ID)
+							}
+						}
+						*msg = anthropic.Message{}
 					}
-					fmt.Printf("FOUND EVENT: %s: %s\n", event.Event, event.Data)
 				}
 			}()
 
@@ -232,7 +242,7 @@ func main() {
 	})
 
 	fmt.Println("proxy started")
-	agentID := R(ctx, "docker run --init -dit --rm --net container:%s -v /tmp/claude.json:/root/.claude.json -e CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 -e ANTHROPIC_BASE_URL=http://localhost:8080 -v /tmp/claude.state/.credentials.json:/root/.claude/.credentials.json -v /tmp/claude.json:/root/.claude.json -w /root/vibing cosmos-agent:claude", M2(os.Hostname()))
+	agentID := R(ctx, "docker run --init -dit --rm --net container:%s -e CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 -e ANTHROPIC_BASE_URL=http://localhost:8080 -v /tmp/claude.state/.credentials.json:/root/.claude/.credentials.json -v /tmp/claude.json:/root/.claude.json -w /root/vibing cosmos-agent:claude", M2(os.Hostname()))
 	fmt.Println(agentID)
 	enc := json.NewEncoder(conn)
 	M(enc.Encode(agentID))
