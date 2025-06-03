@@ -14,7 +14,6 @@ import (
 	"net/http/httputil"
 	"os"
 	"os/signal"
-	"sync"
 	"syscall"
 	"time"
 
@@ -33,12 +32,12 @@ var numRequests = 0
 func startProxy(addr string) *http.Server {
 	log.Printf("Proxy listening on %s\n", addr)
 
-	var m sync.Mutex
+	// var m sync.Mutex
 	proxy := &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			// One request at a time
 			// Unlock is in ModifyResponse
-			m.Lock()
+			// m.Lock()
 			numRequests++
 			pr.Out.URL.Scheme = "https"
 			pr.Out.URL.Host = ANTHROPIC_BASE_DOMAIN
@@ -94,7 +93,7 @@ func startProxy(addr string) *http.Server {
 				fmt.Printf("=== RESPONSE [%d] ===\n\n", numRequests)
 				go func() {
 					defer fmt.Println("\n\nDONE RESPONSE\n")
-					defer m.Unlock()
+					// defer m.Unlock()
 					io.Copy(os.Stdout, dupBody)
 				}()
 				return nil
@@ -106,7 +105,7 @@ func startProxy(addr string) *http.Server {
 
 			// TODO: context?
 			go func() {
-				defer m.Unlock()
+				// defer m.Unlock()
 				for {
 					msg, err := sseReader.ReadEvent()
 					if err != nil {
