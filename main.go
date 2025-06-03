@@ -3,15 +3,12 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"io"
-	"net"
 	"os"
 	"os/exec"
 	"strings"
-	"time"
 
+	"github.com/mattn/go-isatty"
 	. "github.com/tiborvass/cosmos/utils"
 )
 
@@ -33,7 +30,7 @@ func main() {
 
 	ctx := context.Background()
 
-	// claudeJSONBytes := []byte(M2(dag.Host().File("/tmp/claude.json").Contents(ctx)))
+	// Read claude configuration
 	claudeJSONBytes := M2(os.ReadFile("/tmp/claude.json"))
 	var claudeJSON map[string]any
 	M(json.Unmarshal(claudeJSONBytes, &claudeJSON))
@@ -46,108 +43,30 @@ func main() {
 		"/w": projects["/root/vibing"],
 	}
 	claudeJSONBytes = M2(json.Marshal(claudeJSON))
-	// claudeFile := dag.File(".claude.json", string(claudeJSONBytes))
-
-	// claudeCreds := M2(os.ReadFile("/tmp/claude-credentials.json"))
 
 	workdir := M2(os.Getwd())
-	args := strings.Fields(fmt.Sprintf("docker run -d --init --rm -p 8042 -v %s:/src -v /tmp/claude.json:/tmp/claude.json -v /tmp/claude.state/.credentials.json:/tmp/claude.state/.credentials.json -v /var/run/docker.sock:/var/run/docker.sock cosmos-manager claude", workdir))
+
+	// Build docker run command for the combined container
+	dockerArgs := fmt.Sprintf("docker run --init --rm -v %s:%s -v /tmp/claude.json:/root/.claude.json -v /tmp/claude.state/.credentials.json:/root/.claude/.credentials.json -w %s -e CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 cosmos", workdir, workdir, workdir)
+
+	// Add -it if we have a TTY
+	if isatty.IsTerminal(os.Stdin.Fd()) {
+		dockerArgs = strings.Replace(dockerArgs, "docker run", "docker run -it", 1)
+	}
+
+	args := strings.Fields(dockerArgs)
 	args = append(args, os.Args[2:]...)
 
-	managerID := RS(ctx, args)
-	defer exec.Command("docker", "stop", managerID).Run()
-
-	// Discover host-side address for 8042/tcp
-	addr := R(ctx, "docker port %s 8042/tcp", managerID)
-	/*
-		cli, err := client.NewClientWithOpts(
-			client.FromEnv,
-			client.WithAPIVersionNegotiation(),
-		)
-		if err != nil {
-			panic(err)
-		}
-		inspect, err := cli.ContainerInspect(ctx, managerID)
-		if err != nil {
-			panic(err)
-		}
-		bindings := inspect.NetworkSettings.Ports[nat.Port("8042/tcp")]
-		if len(bindings) == 0 {
-			panic("manager exposes no 8042/tcp binding")
-		}
-		hostIP := bindings[0].HostIP
-		if hostIP == "" {
-			hostIP = "127.0.0.1" // docker returns empty for all-interfaces; pick loopback
-		}
-		addr := net.JoinHostPort(hostIP, bindings[0].HostPort)
-	*/
-
-	dialer := &net.Dialer{}
-	var (
-		err  error
-		conn net.Conn
-	)
-	fmt.Println("connecting to manager")
-	maxRetries := 5
-	backoff := time.Second / 2
-	for range maxRetries {
-		conn, err = dialer.DialContext(ctx, "tcp", addr)
-		if err == nil {
-			break
-		}
-		fmt.Fprintf(os.Stderr, "unable to connect to cosmos-manager (%s %s): %v, retrying in %v...\n", managerID, addr, err, backoff)
-		time.Sleep(backoff)
-		backoff *= 2
-	}
-	fmt.Println("connected to manager")
-	if err != nil {
-		panic(fmt.Errorf("failed to connect after %d retries: %v", maxRetries, err))
-	}
-	var agentID string
-	d := json.NewDecoder(conn)
-	err = d.Decode(&agentID)
-	if err != nil && !errors.Is(err, io.EOF) {
-		panic(err)
-	}
-	fmt.Println("agent", agentID)
-
-	cmd := exec.CommandContext(ctx, "docker", "attach", agentID)
+	// Run the container directly with stdin/stdout/stderr attached
+	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
+
 	if err := cmd.Run(); err != nil {
-		fmt.Println(agentID)
-	}
-
-	// ctr := dag.Container().From("node:24.1.0-slim@sha256:5ae787590295f944e7dc200bf54861bac09bf21b5fdb4c9b97aee7781b6d95a2").
-	// 	WithMountedCache("$HOME/.npm", dag.CacheVolume("npm"), dagger.ContainerWithMountedCacheOpts{Expand: true}).
-	// 	WithExec(strings.Fields("npm install -g @anthropic-ai/claude-code")).
-	// 	WithServiceBinding("coding-proxy", svc).
-	// 	// TODO: git?
-	// 	WithMountedDirectory("/w", dag.Host().Directory(".")).
-	// 	WithWorkdir("/w").
-	// 	WithEnvVariable("ANTHROPIC_BASE_URL", fmt.Sprintf("http://coding-proxy:%d", port)).
-	// 	// TODO: store claude-credentials.json in tmpfs
-	// 	// FIXME: Expand doesn't expand $HOME neither in secret uri, nor target path
-	// 	// WithMountedSecret("/root/.claude/.credentials.json", creds, dagger.ContainerWithMountedSecretOpts{Expand: true}).
-	// 	WithMountedFile("/root/.claude.json", claudeFile).
-	// 	// WithMountedDirectory("$HOME/.claude", claudeState, dagger.ContainerWithMountedDirectoryOpts{Expand: true}).
-	// 	WithMountedFile("/root/.claude/.credentials.json", claudeCreds).
-	// 	// Terminal(dagger.ContainerTerminalOpts{Cmd: []string{"/bin/bash"}})
-	// 	Terminal(dagger.ContainerTerminalOpts{Cmd: claudeCmd})
-
-	// M2(ctr.Sync(ctx))
-
-	/*
-		cmd := exec.Command("docker", "run", "-it", "--rm", "-v", "/tmp/claude-credentials.json:/root/.claude/.credentials.json", "cosmos:claude")
-
-		cmd.Args = append(cmd.Args, args...)
-		// syscall.Exec(cmd.Args[0], cmd.Args, os.Environ())
-		cmd.Stdin = os.Stdin
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-		if err := cmd.Start(); err != nil {
-			panic(err)
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			os.Exit(exitErr.ExitCode())
 		}
-	*/
+		panic(err)
+	}
 }
