@@ -66,6 +66,7 @@ func startProxy(addr string) *http.Server {
 			// fmt.Println()
 			pr.Out.URL.Scheme = "https"
 			pr.Out.URL.Host = ANTHROPIC_BASE_DOMAIN
+			pr.Out.Host = ANTHROPIC_BASE_DOMAIN
 			reqDump := M2(httputil.DumpRequestOut(pr.Out, true))
 			log.Printf("===[REQUEST %d]===\n\n%s\n\n", numRequests, reqDump)
 		},
@@ -184,7 +185,7 @@ func main() {
 	})
 
 	fmt.Println("proxy started")
-	agentID := R(ctx, "docker run --init -dit --rm --net container:%s -e CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 -e ANTHROPIC_BASE_URL=http://localhost:8080 -v /tmp/claude.state/.credentials.json:/root/.claude/.credentials.json -v /tmp/claude.json:/root/.claude.json -w /root/vibing cosmos-agent:claude", M2(os.Hostname()))
+	agentID := R(ctx, "docker run --init -dit --rm --net container:%s -v /tmp/claude.json:/root/.claude.json -e CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 -e ANTHROPIC_BASE_URL=http://localhost:8080 -v /tmp/claude.state/.credentials.json:/root/.claude/.credentials.json -v /tmp/claude.json:/root/.claude.json -w /root/vibing cosmos-agent:claude", M2(os.Hostname()))
 	fmt.Println(agentID)
 	enc := json.NewEncoder(conn)
 	M(enc.Encode(agentID))
