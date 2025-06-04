@@ -60,6 +60,11 @@ func main() {
 		os.Exit(1)
 	}
 
+	img := "cosmos"
+	if len(os.Args) > 2 {
+		img = os.Args[2]
+	}
+
 	ctx := context.Background()
 
 	// Read claude configuration
@@ -80,7 +85,7 @@ func main() {
 
 	// Build docker run command for the combined container
 	// dockerArgs := fmt.Sprintf("docker run --init --rm -v %s:%s -v /tmp/claude.json:/root/.claude.json -v /tmp/claude.state/.credentials.json:/root/.claude/.credentials.json -w %s -e CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 cosmos", workdir, workdir, workdir)
-	dockerArgs := fmt.Sprintf("docker run -d --init -P --rm -h cosmos --tmpfs /cosmos -v %s:/root/vibing -v /tmp/claude.json:/root/.claude.json -v /tmp/claude.state/.credentials.json:/root/.claude/.credentials.json -w /root/vibing -e CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 cosmos", workdir)
+	dockerArgs := fmt.Sprintf("docker run -d --init -P --rm -h cosmos --tmpfs /cosmos -v %s:/root/vibing -v /tmp/claude.json:/root/.claude.json -v /tmp/claude.state/.credentials.json:/root/.claude/.credentials.json -w /root/vibing -e CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 %s", workdir, img)
 
 	// Add -it if we have a TTY
 	if isatty.IsTerminal(os.Stdin.Fd()) {
