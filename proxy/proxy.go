@@ -3,6 +3,7 @@ package main
 import (
 	"compress/gzip"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -16,6 +17,7 @@ import (
 	"syscall"
 
 	"github.com/andybalholm/brotli"
+	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/r3labs/sse"
 	"github.com/tiborvass/cosmos/ctxio"
 	. "github.com/tiborvass/cosmos/utils"
@@ -27,6 +29,7 @@ const (
 
 var (
 	numRequests = 0
+	toolUseIDs  = map[string]struct{}{}
 	logger      *log.Logger
 )
 
@@ -48,29 +51,24 @@ func startProxy(addr string) *http.Server {
 	proxy := &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			m.Lock()
-			// defer m.Unlock()
 
 			ctx := pr.In.Context()
-			body := io.NopCloser(pr.Out.Body)
-			// One request at a time
-			// Unlock is in ModifyResponse
+			rout := ctxio.NewReaderFanOut(ctx, pr.Out.Body, 2)
+			var dupBody io.ReadCloser
+			pr.Out.Body, dupBody = rout.Readers[0], rout.Readers[1]
+
 			numRequests++
-			logger.Printf("=== [REQUEST %d] %s %s ===\n", numRequests, pr.Out.Method, pr.Out.URL.Path)
+			logger.Printf("=== [REQUEST %d] ===\n\n", numRequests)
+
+			go func() {
+				defer rout.Close()
+				defer logger.Println("\n\nDONE REQUEST")
+				io.Copy(os.Stdout, dupBody)
+			}()
 
 			pr.Out.URL.Scheme = "https"
 			pr.Out.URL.Host = ANTHROPIC_BASE_DOMAIN
 			pr.Out.Host = ANTHROPIC_BASE_DOMAIN
-
-			rout := ctxio.NewReaderFanOut(ctx, body, 2)
-			var dupBody io.ReadCloser
-			pr.Out.Body, dupBody = rout.Readers[0], rout.Readers[1]
-
-			go func() {
-				defer rout.Close()
-				defer logger.Println("=== END REQUEST ===")
-				// Log request body to file
-				io.Copy(logger.Writer(), dupBody)
-			}()
 
 		},
 		ModifyResponse: func(resp *http.Response) (rerr error) {
@@ -102,87 +100,88 @@ func startProxy(addr string) *http.Server {
 			}
 
 			ct := resp.Header.Get("Content-Type")
-			logger.Printf("Response Content-Type: %s", ct)
 			if ct != "" {
 				mediaType, params, err := mime.ParseMediaType(ct)
 				if err != nil {
 					return err
 				}
 				if charset, ok := params["charset"]; ok && charset != "utf-8" {
-					return fmt.Errorf("unhandled charset %s", charset)
+					return fmt.Errorf("unhandled mime type params %q", params["charset"])
 				}
-				switch mediaType {
-				case "text/event-stream":
-					defer m.Unlock()
-					logger.Printf("=== [RESPONSE %d - SSE] Status: %d ===\n", numRequests, resp.StatusCode)
-					rout := ctxio.NewReaderFanOut(ctx, body, 2)
-					defer rout.Close()
-					resp.Body = io.NopCloser(rout.Readers[1])
-
-					// https://github.com/r3labs/sse/blob/5b0a3bfa0ede4ec1677bb22bfe40b59df1aa9de0/http.go#L42
-					scanner := sse.NewEventStreamReader(rout.Readers[0])
-
-					go func() {
-						defer logger.Println("=== END SSE RESPONSE ===")
-						for {
-							msg, err := scanner.ReadEvent()
-							if err != nil {
-								if errors.Is(err, io.EOF) {
-									logger.Println("SSE: EOF")
-									return
-								}
-								// Read error
-								logger.Printf("Error parsing SSE: %v", err)
-								return
-							}
-
-							if msg != nil && len(msg) > 0 {
-								event, err := processEvent(msg, false)
-								if err != nil {
-									logger.Printf("Error processing event: %v", err)
-									continue
-								}
-								if event != nil && len(event.Data) > 0 {
-									logger.Printf("SSE Event: %s", string(event.Data))
-								}
-							}
-						}
-					}()
-					return nil
-				case "application/json":
-					defer m.Unlock()
-					logger.Printf("=== [RESPONSE %d - JSON] Status: %d ===\n", numRequests, resp.StatusCode)
-				default:
-					panic(fmt.Errorf("unhandled media type %s", mediaType))
-				}
+				ct = mediaType
 			}
 
-			rout := ctxio.NewReaderFanOut(ctx, body, 2)
-			defer rout.Close()
+			rout := ctxio.NewReaderFanOut(ctx, io.NopCloser(body), 2)
 			var dupBody io.ReadCloser
-			resp.Body, dupBody = io.NopCloser(rout.Readers[0]), rout.Readers[1]
+			resp.Body, dupBody = rout.Readers[0], rout.Readers[1]
 
+			if ct != "text/event-stream" {
+				logger.Printf("=== RESPONSE [%d] ===\n\n", numRequests)
+				go func() {
+					defer logger.Println("\n\nDONE RESPONSE")
+					defer m.Unlock()
+					io.Copy(os.Stdout, dupBody)
+				}()
+				return nil
+			}
+			logger.Println("\n\nSSE")
+			sseReader := sse.NewEventStreamReader(dupBody)
+
+			// TODO: context?
 			go func() {
-				defer logger.Println("=== END RESPONSE ===")
-				io.Copy(logger.Writer(), dupBody)
+				defer rout.Close()
+				defer m.Unlock()
+				encodingBase64 := false
+				msg := new(anthropic.Message)
+				for {
+					p, err := sseReader.ReadEvent()
+					if err != nil {
+						return
+					}
+					event := M2(processEvent(p, encodingBase64))
+					var ev anthropic.MessageStreamEventUnion
+					M(json.Unmarshal(event.Data, &ev))
+					M(msg.Accumulate(ev))
+					if _, ok := ev.AsAny().(anthropic.MessageStopEvent); ok {
+						for _, content := range msg.Content {
+							if content.Type == "tool_use" {
+								// For some reason msg.ToolUseID is empty
+								toolUseID := content.ID
+								// TODO: locks
+								toolUseIDs[toolUseID] = struct{}{}
+								logger.Printf("FOUND EVENT: %s: %v\n", event.Event, content.ID)
+							}
+						}
+						*msg = anthropic.Message{}
+					}
+				}
 			}()
 
 			return nil
 		},
 	}
 
-	server := &http.Server{
-		Addr:    addr,
-		Handler: proxy,
+	s := &http.Server{Addr: addr}
+
+	handler := func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodConnect {
+			w.WriteHeader(http.StatusBadGateway)
+			s.Shutdown(context.Background())
+			// handleConnect(w, r)
+			return
+		}
+		proxy.ServeHTTP(w, r)
 	}
 
+	s.Handler = http.HandlerFunc(handler)
+
 	go func() {
-		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		if err := s.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			panic(err)
 		}
 	}()
 
-	return server
+	return s
 }
 
 func main() {
