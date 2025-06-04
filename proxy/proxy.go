@@ -9,12 +9,15 @@ import (
 	"io"
 	"log"
 	"mime"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"os"
+	"os/exec"
 	"os/signal"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/andybalholm/brotli"
 	"github.com/anthropics/anthropic-sdk-go"
@@ -63,7 +66,7 @@ func startProxy(addr string) *http.Server {
 			go func() {
 				defer rout.Close()
 				defer logger.Println("\n\nDONE REQUEST")
-				io.Copy(os.Stdout, dupBody)
+				io.Copy(logger.Writer(), dupBody)
 			}()
 
 			pr.Out.URL.Scheme = "https"
@@ -120,7 +123,7 @@ func startProxy(addr string) *http.Server {
 				go func() {
 					defer logger.Println("\n\nDONE RESPONSE")
 					defer m.Unlock()
-					io.Copy(os.Stdout, dupBody)
+					io.Copy(logger.Writer(), dupBody)
 				}()
 				return nil
 			}
@@ -181,6 +184,20 @@ func startProxy(addr string) *http.Server {
 		}
 	}()
 
+	// Wait for proxy to be ready (silently)
+	maxRetries := 30
+	for i := 0; i < maxRetries; i++ {
+		conn, err := net.DialTimeout("tcp", addr, time.Second)
+		if err == nil {
+			conn.Close()
+			break
+		}
+		if i == maxRetries-1 {
+			panic(fmt.Errorf("proxy failed to start after %d attempts", maxRetries))
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+
 	return s
 }
 
@@ -196,10 +213,26 @@ func main() {
 		stop()
 	}()
 
-	proxy := startProxy(":8080")
+	addr := "localhost:8080"
+	proxy := startProxy(addr)
 
-	// Wait for shutdown signal
-	<-ctx.Done()
+	// Execute claude with all arguments passed to the entrypoint
+	claudeCmd := exec.CommandContext(ctx, "/usr/local/bin/claude", os.Args[1:]...)
+	claudeCmd.Env = append(os.Environ(), "ANTHROPIC_BASE_URL=http://"+addr)
+	claudeCmd.Stdin = os.Stdin
+	claudeCmd.Stdout = os.Stdout
+	claudeCmd.Stderr = os.Stderr
+
+	// Run claude and wait for it to complete
+	err := claudeCmd.Run()
+
+	// Exit with claude's exit code
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			os.Exit(exitErr.ExitCode())
+		}
+		panic(err)
+	}
 
 	logger.Println("Shutting down proxy...")
 	if err := proxy.Shutdown(context.Background()); err != nil && !errors.Is(err, http.ErrServerClosed) {

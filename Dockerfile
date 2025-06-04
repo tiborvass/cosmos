@@ -6,15 +6,10 @@ ENV GOARCH=${TARGETARCH}
 # Build proxy
 RUN --mount=target=/w --mount=type=cache,target=/root/.cache/go-build --mount=type=cache,target=/go/pkg/mod \
     CGO_ENABLED=0 go build -o /tmp/cosmos-proxy ./proxy
-# Build entrypoint
-RUN --mount=target=/w --mount=type=cache,target=/root/.cache/go-build --mount=type=cache,target=/go/pkg/mod \
-    CGO_ENABLED=0 go build -o /tmp/cosmos-entrypoint ./entrypoint
 
 FROM node:24.1.0-slim@sha256:5ae787590295f944e7dc200bf54861bac09bf21b5fdb4c9b97aee7781b6d95a2 AS cosmos
 RUN --mount=type=cache,target=/root/.npm npm install -g @anthropic-ai/claude-code
 RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
-COPY --from=builder /tmp/cosmos-proxy /usr/local/bin/proxy
-COPY --from=builder /tmp/cosmos-entrypoint /usr/local/bin/cosmos-entrypoint
-RUN chmod +x /usr/local/bin/proxy /usr/local/bin/cosmos-entrypoint
+COPY --from=builder /tmp/cosmos-proxy /usr/local/bin/cosmos-proxy
 EXPOSE 8080
-ENTRYPOINT ["/usr/local/bin/cosmos-entrypoint"]
+ENTRYPOINT ["/usr/local/bin/cosmos-proxy"]
