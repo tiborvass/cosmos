@@ -44,35 +44,26 @@ type Message struct {
 	Content interface{} `json:"content,omitempty"` // Can be string or []MessageContent
 }
 
-// ToolCompletionCorrelator efficiently streams and detects tool completions
-type ToolCompletionCorrelator struct {
+// ToolsTracker efficiently streams and detects tool completions
+type ToolsTracker struct {
 	pendingToolIDs map[string]struct{}
+	ch             chan ToolCompletionEvent
 	m              sync.RWMutex
-	onCompletion   func(ToolCompletionEvent)
 }
 
-/////////
-///////// runningtools
-/////////
-
-// NewToolCompletionCorrelator creates a correlator with known pending tool IDs
-func NewToolCompletionCorrelator(pendingToolIDs map[string]struct{}, onCompletion func(ToolCompletionEvent)) *ToolCompletionCorrelator {
-	// Copy map to avoid race conditions
-	pending := make(map[string]struct{})
-	if pendingToolIDs != nil {
-		for id := range pendingToolIDs {
-			pending[id] = struct{}{}
-		}
+// NewToolsTracker creates a tracker with known pending tool IDs
+func NewToolsTracker(pendingToolIDs map[string]struct{}) *ToolsTracker {
+	if pendingToolIDs == nil {
+		pendingToolIDs = map[string]struct{}{}
 	}
-
-	return &ToolCompletionCorrelator{
-		pendingToolIDs: pending,
-		onCompletion:   onCompletion,
+	return &ToolsTracker{
+		pendingToolIDs: pendingToolIDs,
+		ch:             make(chan ToolCompletionEvent, 1),
 	}
 }
 
 // AddPendingTool adds a tool ID to track for completion
-func (tc *ToolCompletionCorrelator) AddPendingTool(toolID string) {
+func (tc *ToolsTracker) AddPendingTool(toolID string) {
 	if tc == nil || toolID == "" {
 		return
 	}
@@ -82,14 +73,7 @@ func (tc *ToolCompletionCorrelator) AddPendingTool(toolID string) {
 }
 
 // StreamAndDetectCompletions efficiently parses JSONL stream to detect tool completions
-func (tc *ToolCompletionCorrelator) StreamAndDetectCompletions(reader io.Reader) error {
-	if tc == nil {
-		return fmt.Errorf("nil correlator")
-	}
-	if reader == nil {
-		return fmt.Errorf("nil reader")
-	}
-
+func (tc *ToolsTracker) StreamAndDetectCompletions(reader io.Reader) error {
 	decoder := json.NewDecoder(reader)
 	lineNo := 0
 	var lastError error
@@ -125,7 +109,7 @@ func (tc *ToolCompletionCorrelator) StreamAndDetectCompletions(reader io.Reader)
 }
 
 // checkForToolResults looks for tool_result content indicating tool completion
-func (tc *ToolCompletionCorrelator) checkForToolResults(content []interface{}, timestamp time.Time, lineNo int) {
+func (tc *ToolsTracker) checkForToolResults(content []interface{}, timestamp time.Time, lineNo int) {
 	if tc == nil || content == nil {
 		return
 	}
@@ -166,26 +150,16 @@ func (tc *ToolCompletionCorrelator) checkForToolResults(content []interface{}, t
 		// Tool has completed
 		tc.markToolCompleted(toolIDStr)
 
-		if tc.onCompletion != nil {
-			// Recover from panic in callback
-			func() {
-				defer func() {
-					if r := recover(); r != nil {
-						fmt.Fprintf(os.Stderr, "ERROR: Panic in completion callback for tool %s: %v\n", toolIDStr, r)
-					}
-				}()
-				tc.onCompletion(ToolCompletionEvent{
-					ToolID:    toolIDStr,
-					Timestamp: timestamp,
-					LineNo:    lineNo,
-				})
-			}()
+		tc.ch <- ToolCompletionEvent{
+			ToolID:    toolIDStr,
+			Timestamp: timestamp,
+			LineNo:    lineNo,
 		}
 	}
 }
 
 // isPendingTool checks if a tool ID is pending completion
-func (tc *ToolCompletionCorrelator) isPendingTool(toolID string) bool {
+func (tc *ToolsTracker) isPendingTool(toolID string) bool {
 	if tc == nil || toolID == "" {
 		return false
 	}
@@ -196,7 +170,7 @@ func (tc *ToolCompletionCorrelator) isPendingTool(toolID string) bool {
 }
 
 // markToolCompleted removes tool from pending list
-func (tc *ToolCompletionCorrelator) markToolCompleted(toolID string) {
+func (tc *ToolsTracker) markToolCompleted(toolID string) {
 	if tc == nil || toolID == "" {
 		return
 	}
@@ -206,7 +180,7 @@ func (tc *ToolCompletionCorrelator) markToolCompleted(toolID string) {
 }
 
 // GetPendingTools returns copy of currently pending tool IDs
-func (tc *ToolCompletionCorrelator) GetPendingTools() map[string]struct{} {
+func (tc *ToolsTracker) GetPendingTools() map[string]struct{} {
 	if tc == nil {
 		return make(map[string]struct{})
 	}
@@ -220,18 +194,32 @@ func (tc *ToolCompletionCorrelator) GetPendingTools() map[string]struct{} {
 	return result
 }
 
+func (tc *ToolsTracker) Wait() {
+	for {
+		func() {
+			tc.m.Lock()
+			defer tc.m.Unlock()
+			if len(tc.pendingToolIDs) == 0 {
+				return
+			}
+			time.Sleep(time.Second)
+		}()
+	}
+}
+
 // ProcessLogFileForCompletions convenience function to process a specific log file
-func ProcessLogFileForCompletions(filepath string, pendingToolIDs map[string]struct{}, onCompletion func(ToolCompletionEvent)) error {
+func ProcessLogFileForCompletions(filepath string) (*ToolsTracker, error) {
 	if filepath == "" {
-		return fmt.Errorf("empty filepath")
+		return nil, fmt.Errorf("empty filepath")
 	}
 
 	file, err := os.Open(filepath)
 	if err != nil {
-		return fmt.Errorf("failed to open log file: %w", err)
+		return nil, fmt.Errorf("failed to open log file: %w", err)
 	}
 	defer file.Close()
 
-	correlator := NewToolCompletionCorrelator(pendingToolIDs, onCompletion)
-	return correlator.StreamAndDetectCompletions(file)
+	tracker := NewToolsTracker(nil)
+	go tracker.StreamAndDetectCompletions(file)
+	return tracker, nil
 }

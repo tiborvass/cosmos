@@ -11,7 +11,7 @@ import (
 func TestExtendedToolCorrelator(t *testing.T) {
 	t.Run("NilSafety", func(t *testing.T) {
 		// Test nil correlator
-		var nilCorrelator *ToolCompletionCorrelator
+		var nilCorrelator *ToolsTracker
 		pending := nilCorrelator.GetPendingTools()
 		if len(pending) != 0 {
 			t.Errorf("Expected empty map from nil correlator, got %d items", len(pending))
@@ -25,7 +25,7 @@ func TestExtendedToolCorrelator(t *testing.T) {
 		}
 
 		// Test empty string operations
-		correlator := NewToolCompletionCorrelator(nil, nil)
+		correlator := NewToolsTracker(nil)
 		correlator.AddPendingTool("")
 		pending = correlator.GetPendingTools()
 		if len(pending) != 0 {
@@ -45,9 +45,11 @@ func TestExtendedToolCorrelator(t *testing.T) {
 		}
 
 		var completedTools []ToolCompletionEvent
-		correlator := NewToolCompletionCorrelator(pendingTools, func(event ToolCompletionEvent) {
-			completedTools = append(completedTools, event)
-		})
+		correlator := NewToolsTracker(pendingTools)
+		go func() {
+			tool := <-correlator.ch
+			completedTools = append(completedTools, tool)
+		}()
 
 		// Capture stderr to verify error logging
 		old := os.Stderr
@@ -84,58 +86,6 @@ func TestExtendedToolCorrelator(t *testing.T) {
 		}
 	})
 
-	t.Run("PanicInCallback", func(t *testing.T) {
-		pendingTools := map[string]struct{}{
-			"toolu_panic": {},
-		}
-
-		// Capture stderr to verify panic recovery message
-		old := os.Stderr
-		r, w, _ := os.Pipe()
-		os.Stderr = w
-
-		// Callback that panics
-		panicCallback := func(event ToolCompletionEvent) {
-			panic("test panic")
-		}
-
-		correlator := NewToolCompletionCorrelator(pendingTools, panicCallback)
-
-		jsonlStream := `{"type":"user","message":{"role":"user","content":[{"tool_use_id":"toolu_panic","type":"tool_result","content":"Result"}]},"timestamp":"2025-06-03T21:48:07.681Z"}`
-
-		reader := strings.NewReader(jsonlStream)
-
-		// Should not panic the entire program
-		defer func() {
-			if r := recover(); r != nil {
-				t.Errorf("Panic escaped callback: %v", r)
-			}
-		}()
-
-		err := correlator.StreamAndDetectCompletions(reader)
-
-		w.Close()
-		os.Stderr = old
-		var buf bytes.Buffer
-		io.Copy(&buf, r)
-		stderrOutput := buf.String()
-
-		if err != nil {
-			t.Fatalf("StreamAndDetectCompletions failed: %v", err)
-		}
-
-		// Should have logged the panic
-		if !strings.Contains(stderrOutput, "ERROR: Panic in completion callback") {
-			t.Error("Expected panic recovery message in stderr")
-		}
-
-		// Tool should still be marked as completed despite panic
-		pending := correlator.GetPendingTools()
-		if len(pending) != 0 {
-			t.Errorf("Expected tool to be completed despite panic, got %d pending", len(pending))
-		}
-	})
-
 	t.Run("ComplexNestedContent", func(t *testing.T) {
 		pendingTools := map[string]struct{}{
 			"toolu_nested1": {},
@@ -143,9 +93,11 @@ func TestExtendedToolCorrelator(t *testing.T) {
 		}
 
 		var completedTools []ToolCompletionEvent
-		correlator := NewToolCompletionCorrelator(pendingTools, func(event ToolCompletionEvent) {
-			completedTools = append(completedTools, event)
-		})
+		correlator := NewToolsTracker(pendingTools)
+		go func() {
+			tool := <-correlator.ch
+			completedTools = append(completedTools, tool)
+		}()
 
 		// Multiple tool results in one message
 		jsonlStream := `{"type":"user","message":{"role":"user","content":[{"tool_use_id":"toolu_nested1","type":"tool_result","content":"Result 1"},{"tool_use_id":"toolu_nested2","type":"tool_result","content":"Result 2"},{"type":"text","text":"Some text"}]},"timestamp":"2025-06-03T21:48:07.681Z"}`
@@ -178,9 +130,11 @@ func TestExtendedToolCorrelator(t *testing.T) {
 		}
 
 		var completedTools []ToolCompletionEvent
-		correlator := NewToolCompletionCorrelator(pendingTools, func(event ToolCompletionEvent) {
-			completedTools = append(completedTools, event)
-		})
+		correlator := NewToolsTracker(pendingTools)
+		go func() {
+			tool := <-correlator.ch
+			completedTools = append(completedTools, tool)
+		}()
 
 		// Test various edge cases
 		jsonlStream := `{"type":"user","message":{"role":"user","content":[null,{"tool_use_id":"toolu_edge","type":"tool_result","content":"Result"},{"type":"tool_result"},{"tool_use_id":123,"type":"tool_result"}]},"timestamp":"2025-06-03T21:48:07.681Z"}`
@@ -203,7 +157,7 @@ func TestExtendedToolCorrelator(t *testing.T) {
 
 	t.Run("ConcurrentAccess", func(t *testing.T) {
 		// Test concurrent access to the correlator
-		correlator := NewToolCompletionCorrelator(map[string]struct{}{}, nil)
+		correlator := NewToolsTracker(map[string]struct{}{})
 
 		done := make(chan bool)
 

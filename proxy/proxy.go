@@ -21,6 +21,7 @@ import (
 
 	"github.com/andybalholm/brotli"
 	"github.com/anthropics/anthropic-sdk-go"
+	"github.com/mattn/go-isatty"
 	"github.com/r3labs/sse"
 	"github.com/tiborvass/cosmos/ctxio"
 	. "github.com/tiborvass/cosmos/utils"
@@ -38,19 +39,103 @@ var (
 
 func init() {
 	// Log to a file instead of stdout to avoid conflicts with Claude's TUI
-	logFile, err := os.OpenFile("/tmp/cosmos-proxy.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	logFile, err := os.OpenFile("/cosmos/proxy.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	if err != nil {
 		// Fallback to stderr if we can't open the log file
-		logger = log.New(os.Stderr, "[PROXY] ", log.LstdFlags)
+		logger = log.New(os.Stderr, "\n[PROXY] ", log.LstdFlags)
 	} else {
-		logger = log.New(logFile, "[PROXY] ", log.LstdFlags)
+		logger = log.New(logFile, "\n[PROXY] ", log.LstdFlags)
 	}
 }
 
-func startProxy(addr string) *http.Server {
+type Proxy struct {
+	http.Server
+	manager *json.Encoder
+	tt      *ToolsTracker
+	// w       *fsnotify.Watcher
+}
+
+func (p *Proxy) Close() {
+	// p.w.Close()
+}
+
+type set struct {
+	m sync.Mutex
+	s map[string]struct{}
+}
+
+func (s *set) Add(key string) {
+	s.m.Lock()
+	s.s[key] = struct{}{}
+	s.m.Unlock()
+}
+
+func (s *set) Remove(key string) (n int) {
+	s.m.Lock()
+	delete(s.s, key)
+	n = len(s.s)
+	s.m.Unlock()
+	return
+}
+
+func startProxy(addr string, managerConn net.Conn) *Proxy {
 	logger.Printf("Proxy listening on %s\n", addr)
 
-	var m sync.Mutex
+	var (
+		m sync.Mutex
+	)
+
+	s := &Proxy{
+		Server:  http.Server{Addr: addr},
+		manager: json.NewEncoder(managerConn),
+	}
+
+	// s.w, err = fsnotify.NewWatcher()
+	// if err != nil {
+	// 	log.Fatal(err)
+	// }
+	// s.w.Add("/root/.claude/projects/-root-vibing")
+
+	// trackerCh := make(chan *ToolsTracker)
+
+	// // Start listening for fs events.
+	// go func() {
+	// 	for {
+	// 		select {
+	// 		case event, ok := <-s.w.Events:
+	// 			if !ok {
+	// 				return
+	// 			}
+	// 			if event.Has(fsnotify.Create) {
+	// 				name := event.Name
+	// 				if !strings.HasSuffix(name, ".jsonl") {
+	// 					log.Println("unexpected event", event.Name, event)
+	// 					continue
+	// 				}
+	// 				tt, err := ProcessLogFileForCompletions(event.Name)
+	// 				if err != nil {
+	// 					log.Printf("error processing log %q: %v", event.Name, err)
+	// 				}
+	// 				select {
+	// 				case trackerCh <- tt:
+	// 				}
+	// 				return
+	// 			}
+	// 		case err, ok := <-s.w.Errors:
+	// 			if !ok {
+	// 				return
+	// 			}
+	// 			log.Println("error:", err)
+	// 		}
+	// 	}
+	// }()
+
+	// var mTools sync.Mutex
+	// var toolsCh chan struct{}
+	// waitTools := make(chan struct{}, 1)
+	toolsQueue := &set{s: map[string]struct{}{}}
+	// toolsDone := &set{s: map[string]struct{}{}}
+
 	proxy := &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			m.Lock()
@@ -61,12 +146,51 @@ func startProxy(addr string) *http.Server {
 			pr.Out.Body, dupBody = rout.Readers[0], rout.Readers[1]
 
 			numRequests++
-			logger.Printf("=== [REQUEST %d] ===\n\n", numRequests)
+			ct := pr.Out.Header.Get("Content-Type")
+			logger.Printf("=== [REQUEST %d: %s] ===\n\n", numRequests, ct)
 
 			go func() {
 				defer rout.Close()
 				defer logger.Println("\n\nDONE REQUEST")
-				io.Copy(logger.Writer(), dupBody)
+				if ct != "application/json" {
+					io.Copy(logger.Writer(), dupBody)
+					return
+				}
+				d := json.NewDecoder(io.TeeReader(dupBody, logger.Writer()))
+				var x map[string]any
+				for {
+					if err := d.Decode(&x); err != nil {
+						if errors.Is(err, io.EOF) {
+							return
+						}
+						logger.Println("request handler found error", err.Error())
+						panic(err)
+					}
+					var messages []any
+					if y, ok := x["messages"]; ok {
+						messages, _ = y.([]any)
+					}
+					for _, msg := range messages {
+						msg, _ := msg.(map[string]any)
+						var contents []any
+						if y, ok := msg["content"]; ok {
+							contents, _ = y.([]any)
+						}
+						for _, content := range contents {
+							content, _ := content.(map[string]any)
+							if typ, ok := content["type"]; ok {
+								if typ, _ := typ.(string); typ == "tool_result" {
+									toolUseID := content["tool_use_id"].(string)
+									count := toolsQueue.Remove(toolUseID)
+									if count == 0 {
+										logger.Println("committing")
+										s.commit()
+									}
+								}
+							}
+						}
+					}
+				}
 			}()
 
 			pr.Out.URL.Scheme = "https"
@@ -116,7 +240,7 @@ func startProxy(addr string) *http.Server {
 
 			rout := ctxio.NewReaderFanOut(ctx, io.NopCloser(body), 2)
 			var dupBody io.ReadCloser
-			resp.Body, dupBody = rout.Readers[0], rout.Readers[1]
+			resp.Body, dupBody = rout.Readers[0], io.NopCloser(io.TeeReader(rout.Readers[1], logger.Writer()))
 
 			if ct != "text/event-stream" {
 				logger.Printf("=== RESPONSE [%d] ===\n\n", numRequests)
@@ -136,6 +260,14 @@ func startProxy(addr string) *http.Server {
 				defer m.Unlock()
 				encodingBase64 := false
 				msg := new(anthropic.Message)
+
+				// logger.Println("\n\nWaiting for tracker")
+				// wait for session file to be created
+				// var tt *ToolsTracker
+				// select {
+				// case tt = <-trackerCh:
+				// }
+				// logger.Println("\n\nTracker found")
 				for {
 					p, err := sseReader.ReadEvent()
 					if err != nil {
@@ -146,13 +278,17 @@ func startProxy(addr string) *http.Server {
 					M(json.Unmarshal(event.Data, &ev))
 					M(msg.Accumulate(ev))
 					if _, ok := ev.AsAny().(anthropic.MessageStopEvent); ok {
+						// Just in case Claude does not accumulate like we do, and starts executing tools as it streams partial json
+						// there could be a race, where Claude executes a tool, writes to jsonlog before we get to AddPendingTool.
+						// FIXME: Tracker should not delete from a map, it should just have 2 maps: one for what's gonna be executed
+						// one for what's been executed, and we should compare the two.
 						for _, content := range msg.Content {
 							if content.Type == "tool_use" {
 								// For some reason msg.ToolUseID is empty
 								toolUseID := content.ID
-								// TODO: locks
-								toolUseIDs[toolUseID] = struct{}{}
-								logger.Printf("FOUND EVENT: %s: %v\n", event.Event, content.ID)
+								toolsQueue.Add(toolUseID)
+								// tt.AddPendingTool(toolUseID)
+								logger.Printf("FOUND EVENT: %s: %v\n", event.Event, toolUseID)
 							}
 						}
 						*msg = anthropic.Message{}
@@ -163,8 +299,6 @@ func startProxy(addr string) *http.Server {
 			return nil
 		},
 	}
-
-	s := &http.Server{Addr: addr}
 
 	handler := func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodConnect {
@@ -201,27 +335,60 @@ func startProxy(addr string) *http.Server {
 	return s
 }
 
+func (p *Proxy) commit() {
+	var x = struct {
+		Action string
+	}{
+		"commit",
+	}
+	logger.Println("Sending commit instruction")
+	M(p.manager.Encode(x))
+}
+
+// Client should not be Client but the subject of the manager
+func startManagerClient(addr string) net.Conn {
+	l := M2(net.Listen("tcp", addr))
+	logger.Println("listening on ", addr)
+	conn := M2(l.Accept())
+	return conn
+}
+
 func main() {
-	logger.Println("Starting proxy...")
+	logger.Println("Starting proxy...", isatty.IsTerminal(os.Stdin.Fd()))
 	defer logger.Println("Proxy shutdown complete")
 	ctx := context.Background()
-	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
-	defer func() {
-		if x := recover(); x != nil {
-			logger.Printf("Panic: %v", x)
-		}
-		stop()
-	}()
+	// ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+	// defer func() {
+	// 	if x := recover(); x != nil {
+	// 		logger.Printf("Panic: %v", x)
+	// 	}
+	// 	stop()
+	// }()
 
-	addr := "localhost:8080"
-	proxy := startProxy(addr)
+	managerAddr := "0.0.0.0:8042"
+	logger.Println("START", managerAddr)
+	managerConn := startManagerClient(managerAddr)
+
+	logger.Println("Client started")
+
+	proxyAddr := "localhost:8080"
+	proxy := startProxy(proxyAddr, managerConn)
+
+	logger.Println("Proxy started")
 
 	// Execute claude with all arguments passed to the entrypoint
 	claudeCmd := exec.CommandContext(ctx, "/usr/local/bin/claude", os.Args[1:]...)
-	claudeCmd.Env = append(os.Environ(), "ANTHROPIC_BASE_URL=http://"+addr)
+	claudeCmd.Env = append(os.Environ(), "ANTHROPIC_BASE_URL=http://"+proxyAddr)
 	claudeCmd.Stdin = os.Stdin
 	claudeCmd.Stdout = os.Stdout
 	claudeCmd.Stderr = os.Stderr
+
+	sigch := make(chan os.Signal, 1)
+	signal.Notify(sigch, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		sig := <-sigch
+		claudeCmd.Process.Signal(sig)
+	}()
 
 	// Run claude and wait for it to complete
 	err := claudeCmd.Run()

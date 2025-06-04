@@ -8,8 +8,8 @@ RUN --mount=target=/w --mount=type=cache,target=/root/.cache/go-build --mount=ty
     CGO_ENABLED=0 go build -o /tmp/cosmos-proxy ./proxy
 
 FROM node:24.1.0-slim@sha256:5ae787590295f944e7dc200bf54861bac09bf21b5fdb4c9b97aee7781b6d95a2 AS cosmos
-RUN --mount=type=cache,target=/root/.npm npm install -g @anthropic-ai/claude-code
-RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
+RUN --mount=type=cache,target=/root/.npm npm install -g @anthropic-ai/claude-code && rm -rf /tmp/*
+RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/* /tmp/*
 COPY --from=builder /tmp/cosmos-proxy /usr/local/bin/cosmos-proxy
-EXPOSE 8080
+EXPOSE 8042
 ENTRYPOINT ["/usr/local/bin/cosmos-proxy"]

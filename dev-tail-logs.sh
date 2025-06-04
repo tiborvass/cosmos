@@ -15,14 +15,14 @@ if [ -z "$CONTAINER_ID" ]; then
 fi
 
 echo "Container: $CONTAINER_ID"
-echo "Log file: /tmp/cosmos-proxy.log (inside container)"
+echo "Log file: /cosmos/proxy.log (inside container)"
 echo ""
 
 # Clear the log file if requested
 if [ "$1" = "--clear" ]; then
-    docker exec "$CONTAINER_ID" sh -c "> /tmp/cosmos-proxy.log"
+    docker exec "$CONTAINER_ID" sh -c "> /cosmos/proxy.log"
     echo "Log file cleared"
 fi
 
 # Tail the logs from inside the container
-docker exec "$CONTAINER_ID" tail -f /tmp/cosmos-proxy.log
+docker exec "$CONTAINER_ID" tail -f /cosmos/proxy.log
