@@ -172,22 +172,37 @@ func startProxy(addr string, managerConn net.Conn) *Proxy {
 					}
 					for _, msg := range messages {
 						msg, _ := msg.(map[string]any)
-						var contents []any
-						if y, ok := msg["content"]; ok {
-							contents, _ = y.([]any)
-						}
-						for _, content := range contents {
-							content, _ := content.(map[string]any)
-							if typ, ok := content["type"]; ok {
-								if typ, _ := typ.(string); typ == "tool_result" {
+						role, _ := msg["role"].(string)
+						contents, _ := msg["content"].([]any)
+						toolNames := map[string]string{}
+						if role == "assistant" {
+							for _, content := range contents {
+								content, _ := content.(map[string]any)
+								typ, _ := content["type"]
+								if typ == "tool_use" {
+									toolUseID := content["id"].(string)
+									toolNames[toolUseID] = content["name"].(string)
+								}
+							}
+						} else if role == "user" {
+							for _, content := range contents {
+								content, _ := content.(map[string]any)
+								typ, _ := content["type"]
+								if typ == "tool_result" {
 									toolUseID := content["tool_use_id"].(string)
+									toolName, ok := toolNames[toolUseID]
+									if !ok {
+										logger.Println("unexpected: did not find tool name for ", toolUseID)
+									}
 									count := toolsQueue.Remove(toolUseID)
 									if count == 0 {
-										logger.Println("committing")
+										logger.Println("committing due to ", toolName, toolUseID)
 										s.commit()
 									}
 								}
 							}
+						} else {
+							logger.Println("unexpected role ", role)
 						}
 					}
 				}
