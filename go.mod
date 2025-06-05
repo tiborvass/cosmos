@@ -5,7 +5,6 @@ go 1.23.5
 require (
 	github.com/andybalholm/brotli v1.1.1
 	github.com/anthropics/anthropic-sdk-go v1.3.0
-	github.com/fsnotify/fsnotify v1.9.0
 	github.com/mattn/go-isatty v0.0.20
 	github.com/r3labs/sse v0.0.0-20210224172625-26fe804710bc
 	golang.org/x/sync v0.14.0

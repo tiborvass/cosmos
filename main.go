@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -29,10 +32,23 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "coding-agent: only \"claude\" is currently supported")
 }
 
+type Snapshot struct {
+	ID        string
+	Message   string
+	SessionID string
+}
+
+var state struct {
+	Projects map[string]struct {
+		Snapshots []Snapshot
+	}
+}
+
 func manage(ctx context.Context, clientID string, conn net.Conn) {
 	d := json.NewDecoder(conn)
 	var x struct {
 		Action string
+		Data   string
 	}
 	for {
 		if err := d.Decode(&x); err != nil {
@@ -43,8 +59,11 @@ func manage(ctx context.Context, clientID string, conn net.Conn) {
 		}
 		switch x.Action {
 		case "commit":
-			snapshotID := R(ctx, "docker commit %s", clientID)
-			fmt.Fprintln(logFile, "Snapshotted", snapshotID)
+			bytes := make([]byte, 32) // 32 bytes = 256 bits
+			M2(rand.Read(bytes))
+			snapshotID := hex.EncodeToString(bytes)
+			imgID := R(ctx, "docker commit -m %q %s cosmos:%s", x.Data, clientID, snapshotID)
+			fmt.Fprintln(logFile, "Snapshot", snapshotID, "image", imgID)
 		}
 	}
 }
@@ -54,15 +73,30 @@ func main() {
 		usage()
 		os.Exit(1)
 	}
+
 	codingAgent := os.Args[1]
+
 	if codingAgent != "claude" {
 		usage()
 		os.Exit(1)
 	}
 
+	args := os.Args[2:]
+
+	cosmosDir := filepath.Join(M2(os.UserConfigDir()), ".cosmos")
+	os.MkdirAll(cosmosDir, 0755)
+
+	stateFile, err := os.Open("~/.cosmos/state.json")
+	if err == nil {
+		M(json.NewDecoder(stateFile).Decode(&state))
+	} else if !os.IsNotExist(err) {
+		panic(err)
+	}
+
 	img := "cosmos"
-	if len(os.Args) > 2 {
-		img = os.Args[2]
+	wd := M2(os.Getwd())
+	if project, ok := state.Projects[wd]; ok && len(project.Snapshots) > 0 {
+		img = project.Snapshots[len(project.Snapshots)-1].ID
 	}
 
 	ctx := context.Background()
@@ -77,7 +111,7 @@ func main() {
 	}
 	// Mask other projects
 	claudeJSON["projects"] = map[string]any{
-		"/w": projects["/root/vibing"],
+		"/w": projects["/home/cosmos/vibing"],
 	}
 	claudeJSONBytes = M2(json.Marshal(claudeJSON))
 
@@ -85,15 +119,14 @@ func main() {
 
 	// Build docker run command for the combined container
 	// dockerArgs := fmt.Sprintf("docker run --init --rm -v %s:%s -v /tmp/claude.json:/root/.claude.json -v /tmp/claude.state/.credentials.json:/root/.claude/.credentials.json -w %s -e CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 cosmos", workdir, workdir, workdir)
-	dockerArgs := fmt.Sprintf("docker run -d --init -P --rm -h cosmos --tmpfs /cosmos -v %s:/root/vibing -v /tmp/claude.json:/root/.claude.json -v /tmp/claude.state/.credentials.json:/root/.claude/.credentials.json -w /root/vibing -e CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 %s", workdir, img)
+	dockerArgs := fmt.Sprintf("docker run -d --init -P --rm -h cosmos --tmpfs /cosmos -v %s:/home/cosmos/vibing -v /tmp/claude.json:/home/cosmos/.claude.json -v /tmp/claude.state/.credentials.json:/home/cosmos/.claude/.credentials.json -w /home/cosmos/vibing -e CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 %s", workdir, img)
 
 	// Add -it if we have a TTY
 	if isatty.IsTerminal(os.Stdin.Fd()) {
 		dockerArgs = strings.Replace(dockerArgs, "docker run ", "docker run -it ", 1)
 	}
 
-	args := strings.Fields(dockerArgs)
-	args = append(args, os.Args[2:]...)
+	args = append(strings.Fields(dockerArgs), args...)
 
 	fmt.Fprintln(logFile, args)
 
@@ -117,7 +150,6 @@ func main() {
 	fmt.Fprintln(logFile, "connecting to client", clientAddr)
 	dialer := &net.Dialer{}
 	var (
-		err  error
 		conn net.Conn
 	)
 
@@ -132,7 +164,7 @@ func main() {
 		time.Sleep(backoff)
 		backoff *= 2
 	}
-	fmt.Fprintln(logFile, "connected to manager")
+	fmt.Fprintln(logFile, "connected to client")
 	if err != nil {
 		panic(fmt.Errorf("failed to connect after %d retries: %v", maxRetries, err))
 	}

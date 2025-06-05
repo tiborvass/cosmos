@@ -152,60 +152,7 @@ func startProxy(addr string, managerConn net.Conn) *Proxy {
 			go func() {
 				defer rout.Close()
 				defer logger.Println("\n\nDONE REQUEST")
-				if ct != "application/json" {
-					io.Copy(logger.Writer(), dupBody)
-					return
-				}
-				d := json.NewDecoder(io.TeeReader(dupBody, logger.Writer()))
-				var x map[string]any
-				for {
-					if err := d.Decode(&x); err != nil {
-						if errors.Is(err, io.EOF) {
-							return
-						}
-						logger.Println("request handler found error", err.Error())
-						panic(err)
-					}
-					var messages []any
-					if y, ok := x["messages"]; ok {
-						messages, _ = y.([]any)
-					}
-					for _, msg := range messages {
-						msg, _ := msg.(map[string]any)
-						role, _ := msg["role"].(string)
-						contents, _ := msg["content"].([]any)
-						toolNames := map[string]string{}
-						if role == "assistant" {
-							for _, content := range contents {
-								content, _ := content.(map[string]any)
-								typ, _ := content["type"]
-								if typ == "tool_use" {
-									toolUseID := content["id"].(string)
-									toolNames[toolUseID] = content["name"].(string)
-								}
-							}
-						} else if role == "user" {
-							for _, content := range contents {
-								content, _ := content.(map[string]any)
-								typ, _ := content["type"]
-								if typ == "tool_result" {
-									toolUseID := content["tool_use_id"].(string)
-									toolName, ok := toolNames[toolUseID]
-									if !ok {
-										logger.Println("unexpected: did not find tool name for ", toolUseID)
-									}
-									count := toolsQueue.Remove(toolUseID)
-									if count == 0 {
-										logger.Println("committing due to ", toolName, toolUseID)
-										s.commit()
-									}
-								}
-							}
-						} else {
-							logger.Println("unexpected role ", role)
-						}
-					}
-				}
+				io.Copy(logger.Writer(), dupBody)
 			}()
 
 			pr.Out.URL.Scheme = "https"
@@ -293,6 +240,7 @@ func startProxy(addr string, managerConn net.Conn) *Proxy {
 					M(json.Unmarshal(event.Data, &ev))
 					M(msg.Accumulate(ev))
 					if _, ok := ev.AsAny().(anthropic.MessageStopEvent); ok {
+						logger.Println("\n\n===TOTO===", msg)
 						// Just in case Claude does not accumulate like we do, and starts executing tools as it streams partial json
 						// there could be a race, where Claude executes a tool, writes to jsonlog before we get to AddPendingTool.
 						// FIXME: Tracker should not delete from a map, it should just have 2 maps: one for what's gonna be executed
@@ -305,6 +253,19 @@ func startProxy(addr string, managerConn net.Conn) *Proxy {
 								// tt.AddPendingTool(toolUseID)
 								logger.Printf("FOUND EVENT: %s: %v\n", event.Event, toolUseID)
 							}
+						}
+						// Prompt is released to user.
+						// TODO: what to do if user add prompts to the queue of prompts ?
+						if msg.StopReason == anthropic.StopReasonEndTurn {
+							logger.Println("acquiring commit lock")
+							toolsQueue.m.Lock()
+							if len(toolsQueue.s) > 0 {
+								s.commit()
+							}
+							logger.Println("committing ", toolsQueue.s)
+							toolsQueue.s = map[string]struct{}{}
+							toolsQueue.m.Unlock()
+							logger.Println("releasing commit lock")
 						}
 						*msg = anthropic.Message{}
 					}
