@@ -59,9 +59,10 @@ func manage(ctx context.Context, clientID string, conn net.Conn) {
 		}
 		switch x.Action {
 		case "commit":
-			bytes := make([]byte, 32) // 32 bytes = 256 bits
+			bytes := make([]byte, 16)
 			M2(rand.Read(bytes))
 			snapshotID := hex.EncodeToString(bytes)
+			// TODO: check if image exists
 			imgID := R(ctx, "docker commit -m %q %s cosmos:%s", x.Data, clientID, snapshotID)
 			fmt.Fprintln(logFile, "Snapshot", snapshotID, "image", imgID)
 		}
@@ -102,24 +103,25 @@ func main() {
 	ctx := context.Background()
 
 	// Read claude configuration
-	claudeJSONBytes := M2(os.ReadFile("/tmp/claude.json"))
-	var claudeJSON map[string]any
-	M(json.Unmarshal(claudeJSONBytes, &claudeJSON))
-	projects, ok := claudeJSON["projects"].(map[string]any)
-	if !ok {
-		panic(fmt.Errorf("\"projects\" key in .claude.json is expected to be an object but is %T: %+v\n", claudeJSON["projects"], claudeJSON["projects"]))
-	}
-	// Mask other projects
-	claudeJSON["projects"] = map[string]any{
-		"/w": projects["/home/cosmos/vibing"],
-	}
-	claudeJSONBytes = M2(json.Marshal(claudeJSON))
+	// claudeJSONBytes := M2(os.ReadFile("/tmp/claude.json"))
+	// var claudeJSON map[string]any
+	// M(json.Unmarshal(claudeJSONBytes, &claudeJSON))
+	// projects, ok := claudeJSON["projects"].(map[string]any)
+	// if !ok {
+	// 	panic(fmt.Errorf("\"projects\" key in .claude.json is expected to be an object but is %T: %+v\n", claudeJSON["projects"], claudeJSON["projects"]))
+	// }
+	// // Mask other projects
+	// claudeJSON["projects"] = map[string]any{
+	// 	"/w": projects["/home/cosmos/vibing"],
+	// }
+	// claudeJSONBytes = M2(json.Marshal(claudeJSON))
 
 	workdir := M2(os.Getwd())
 
 	// Build docker run command for the combined container
 	// dockerArgs := fmt.Sprintf("docker run --init --rm -v %s:%s -v /tmp/claude.json:/root/.claude.json -v /tmp/claude.state/.credentials.json:/root/.claude/.credentials.json -w %s -e CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 cosmos", workdir, workdir, workdir)
-	dockerArgs := fmt.Sprintf("docker run -d --init -P --rm -h cosmos --tmpfs /cosmos -v %s:/home/cosmos/vibing -v /tmp/claude.json:/home/cosmos/.claude.json -v /tmp/claude.state/.credentials.json:/home/cosmos/.claude/.credentials.json -w /home/cosmos/vibing -e CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 %s", workdir, img)
+	dockerArgs := fmt.Sprintf("docker run -d --init -P --rm -h cosmos --tmpfs /cosmos -v %s:/%s -w %s -v /tmp/claude.json:/home/cosmos/.claude.json -v /tmp/claude.state/.credentials.json:/home/cosmos/.claude/.credentials.json -e CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 %s", workdir, workdir, workdir, img)
+	// dockerArgs := fmt.Sprintf("docker run -d --init -P --rm -h cosmos --tmpfs /cosmos -v %s:/%s -w %s -v /tmp/claude.state/.credentials.json:/home/cosmos/.claude/.credentials.json -e CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 %s", workdir, workdir, workdir, img)
 
 	// Add -it if we have a TTY
 	if isatty.IsTerminal(os.Stdin.Fd()) {

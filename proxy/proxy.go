@@ -136,29 +136,62 @@ func startProxy(addr string, managerConn net.Conn) *Proxy {
 	toolsQueue := &set{s: map[string]struct{}{}}
 	// toolsDone := &set{s: map[string]struct{}{}}
 
+	var allReqsData [][]byte
+
 	proxy := &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			m.Lock()
 
 			ctx := pr.In.Context()
-			rout := ctxio.NewReaderFanOut(ctx, pr.Out.Body, 2)
-			var dupBody io.ReadCloser
-			pr.Out.Body, dupBody = rout.Readers[0], rout.Readers[1]
-
 			numRequests++
 			ct := pr.Out.Header.Get("Content-Type")
 			logger.Printf("=== [REQUEST %d: %s] ===\n\n", numRequests, ct)
 
+			rout := ctxio.NewReaderFanOut(ctx, pr.Out.Body, 2)
+			var dupBody io.ReadCloser
+			pr.Out.Body, dupBody = rout.Readers[0], rout.Readers[1]
+
 			go func() {
 				defer rout.Close()
 				defer logger.Println("\n\nDONE REQUEST")
-				io.Copy(logger.Writer(), dupBody)
+				if ct != "application/json" {
+					io.Copy(logger.Writer(), dupBody)
+					return
+				}
+				var x struct {
+					Messages []json.RawMessage
+				}
+				NoEOF(json.NewDecoder(io.TeeReader(dupBody, logger.Writer())).Decode(&x))
+				reqData := M2(json.Marshal(x.Messages))
+				// reqData := M2(io.ReadAll(io.TeeReader(dupBody, logger.Writer())))
+				// M(json.Unmarshal(reqData, &x))
+				// Sometimes model is different, so match only starting from messages
+				// i := bytes.Index(reqData, []byte(`"messages":[`))
+				// reqData = reqData[i:]
+				var msg anthropic.Message
+				M(json.Unmarshal([]byte(x.Messages[len(x.Messages)-1]), &msg))
+				logger.Printf("===MSG===: %+v\n", msg)
+				logger.Println("===REQDATA===", string(reqData))
+				for _, content := range msg.Content {
+					if content.Type == "tool_result" {
+						logger.Println("===TOOL_RESULT===", content.Name)
+						for i := len(allReqsData) - 1; i >= 0; i-- {
+							prevReqData := allReqsData[i]
+							logger.Println("===PREVREQDATA===", i, string(prevReqData))
+							prefix := CommonPrefixBytes(reqData, prevReqData)
+							logger.Println("===PREFIX===", i, string(prefix))
+							if len(prefix) <= len(prevReqData) {
+								logger.Println("===!!!!!===", i)
+							}
+						}
+						allReqsData = append(allReqsData, reqData)
+					}
+				}
 			}()
 
 			pr.Out.URL.Scheme = "https"
 			pr.Out.URL.Host = ANTHROPIC_BASE_DOMAIN
 			pr.Out.Host = ANTHROPIC_BASE_DOMAIN
-
 		},
 		ModifyResponse: func(resp *http.Response) (rerr error) {
 			defer func() { rerr = Defer(rerr) }()
@@ -381,4 +414,16 @@ func main() {
 	if err := proxy.Shutdown(context.Background()); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		panic(err)
 	}
+}
+
+func CommonPrefixBytes(a, b []byte) []byte {
+	minLen := len(a)
+	if len(b) < minLen {
+		minLen = len(b)
+	}
+	i := 0
+	for i < minLen && a[i] == b[i] {
+		i++
+	}
+	return a[:i]
 }

@@ -2,7 +2,9 @@ package util
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"os/exec"
 	"strings"
 )
@@ -30,6 +32,13 @@ func RS(ctx context.Context, args []string) string {
 		out = out[:len(out)-1]
 	}
 	return string(out)
+}
+
+func NoEOF(err error) {
+	if err == nil || errors.Is(err, io.EOF) {
+		return
+	}
+	panic(err)
 }
 
 func Defer(rerr error) error {
