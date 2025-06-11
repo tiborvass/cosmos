@@ -25,6 +25,7 @@ import (
 	"github.com/r3labs/sse"
 	"github.com/tiborvass/cosmos/ctxio"
 	. "github.com/tiborvass/cosmos/utils"
+	"golang.org/x/sys/unix"
 )
 
 const (
@@ -366,6 +367,7 @@ func main() {
 	logger.Println("Starting proxy...", isatty.IsTerminal(os.Stdin.Fd()))
 	defer logger.Println("Proxy shutdown complete")
 	ctx := context.Background()
+
 	// ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	// defer func() {
 	// 	if x := recover(); x != nil {
@@ -392,11 +394,22 @@ func main() {
 	claudeCmd.Stdout = os.Stdout
 	claudeCmd.Stderr = os.Stderr
 
+	// Create a channel to receive OS signals.
 	sigch := make(chan os.Signal, 1)
-	signal.Notify(sigch, os.Interrupt, syscall.SIGTERM)
+	// Notify the channel on SIGINT (Ctrl+C) or SIGTERM
+	signal.Notify(sigch, syscall.SIGINT, syscall.SIGTERM, syscall.SIGUSR1, syscall.SIGUSR2, syscall.SIGQUIT, syscall.SIGHUP)
+
 	go func() {
-		sig := <-sigch
-		claudeCmd.Process.Signal(sig)
+		for {
+			sig := <-sigch
+			if sig, ok := sig.(syscall.Signal); ok {
+				name := unix.SignalName(sig)
+				logger.Println("received signal", name, int(sig), ":", sig.String())
+			} else {
+				logger.Println("received signal", sig)
+			}
+			claudeCmd.Process.Signal(sig)
+		}
 	}()
 
 	// Run claude and wait for it to complete

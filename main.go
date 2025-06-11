@@ -19,6 +19,7 @@ import (
 
 	"github.com/mattn/go-isatty"
 	. "github.com/tiborvass/cosmos/utils"
+	"golang.org/x/sys/unix"
 )
 
 var logFile *os.File
@@ -138,12 +139,19 @@ func main() {
 	// Create a channel to receive OS signals.
 	sigs := make(chan os.Signal, 1)
 	// Notify the channel on SIGINT (Ctrl+C) or SIGTERM
-	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
+	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM, syscall.SIGUSR1, syscall.SIGUSR2, syscall.SIGQUIT, syscall.SIGHUP, syscall.SIGINFO)
 
 	go func() {
-		sig := <-sigs
-		fmt.Fprintln(logFile, "received signal", sig)
-		exec.Command("docker", "stop", clientID).Run()
+		for {
+			sig := <-sigs
+			if sig, ok := sig.(syscall.Signal); ok {
+				name := unix.SignalName(sig)
+				fmt.Fprintln(logFile, "received signal", name, int(sig), ":", sig.String())
+				exec.Command("docker", "kill", "-s", name, clientID).Run()
+			} else {
+				fmt.Fprintln(logFile, "received signal", sig)
+			}
+		}
 	}()
 
 	clientPort := "8042"
@@ -174,6 +182,10 @@ func main() {
 	go manage(ctx, clientID, conn)
 
 	cmd := exec.CommandContext(ctx, "docker", "attach", clientID)
+	cmd.Cancel = func() error {
+		fmt.Fprintln(logFile, "cancelling", clientID)
+		return nil
+	}
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
