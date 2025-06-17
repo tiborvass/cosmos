@@ -116,6 +116,7 @@ func main() {
 		img = v
 		resume = "-r"
 	}
+	// panic("resume: " + resume)
 	wd := M2(os.Getwd())
 	if project, ok := state.Projects[wd]; ok && len(project.Snapshots) > 0 {
 		img = project.Snapshots[len(project.Snapshots)-1].ID
@@ -155,6 +156,10 @@ func main() {
 
 	// Run the container directly with stdin/stdout/stderr attached
 	clientID := RS(ctx, args)
+
+	defer func() {
+		exec.Command("docker", "rm", "-vf", clientID).Run()
+	}()
 
 	// Create a channel to receive OS signals.
 	sigs := make(chan os.Signal, 1)

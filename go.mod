@@ -4,10 +4,12 @@ go 1.23.5
 
 require (
 	github.com/andybalholm/brotli v1.1.1
-	github.com/anthropics/anthropic-sdk-go v1.3.0
+	github.com/anthropics/anthropic-sdk-go v1.4.0
 	github.com/mattn/go-isatty v0.0.20
+	github.com/openai/openai-go v1.6.0
 	github.com/r3labs/sse v0.0.0-20210224172625-26fe804710bc
 	golang.org/x/sync v0.14.0
+	golang.org/x/sys v0.33.0
 )
 
 require (
@@ -17,6 +19,5 @@ require (
 	github.com/tidwall/pretty v1.2.1 // indirect
 	github.com/tidwall/sjson v1.2.5 // indirect
 	golang.org/x/net v0.40.0 // indirect
-	golang.org/x/sys v0.33.0 // indirect
 	gopkg.in/cenkalti/backoff.v1 v1.1.0 // indirect
 )

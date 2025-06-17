@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"compress/gzip"
 	"context"
 	"encoding/json"
@@ -174,21 +175,13 @@ func startProxy(addr string, managerConn net.Conn) *Proxy {
 					Messages []json.RawMessage
 				}
 				NoEOF(json.NewDecoder(io.TeeReader(dupBody, logger.Writer())).Decode(&x))
-				reqData := M2(json.Marshal(x.Messages))
-				// reqData := M2(io.ReadAll(io.TeeReader(dupBody, logger.Writer())))
-				// M(json.Unmarshal(reqData, &x))
-				// Sometimes model is different, so match only starting from messages
-				// i := bytes.Index(reqData, []byte(`"messages":[`))
-				// reqData = reqData[i:]
+
 				switch len(x.Messages) {
 				case 0:
 					err := fmt.Errorf("unexpected number of messages: %d", len(x.Messages))
 					logger.Printf("===ERROR===: %v\n", err)
 					return
 				case 1:
-					return
-				case 2:
-					allReqsData = append(allReqsData, reqData)
 					return
 				}
 				// Get the N-2 message: the user message that contains the last tool_result
@@ -199,24 +192,55 @@ func startProxy(addr string, managerConn net.Conn) *Proxy {
 					return
 				}
 				logger.Printf("===MSG===: %+v\n", msg)
+
+				reqData := M2(json.Marshal(msg.Content))
+				reqData = reqData[1 : len(reqData)-2]
+				// reqData := M2(io.ReadAll(io.TeeReader(dupBody, logger.Writer())))
+				// M(json.Unmarshal(reqData, &x))
+				// Sometimes model is different, so match only starting from messages
+				// i := bytes.Index(reqData, []byte(`"messages":[`))
+				// reqData = reqData[i:]
+				// allReqsData = append(allReqsData, reqData)
+
 				logger.Println("===REQDATA===", string(reqData))
 				for i := len(msg.Content) - 1; i >= 0; i-- {
 					content := msg.Content[i]
 					logger.Printf("===CONTENT===: %+v\n", content)
 					if content.Type == "tool_result" {
 						logger.Println("===TOOL_RESULT===", content.ToolUseID)
+						maxPrefixJ, maxPrefixLen := -1, 0
 						for j := len(allReqsData) - 1; j >= 0; j-- {
 							prevReqData := allReqsData[j]
 							logger.Println("===PREVREQDATA===", j, string(prevReqData))
 							prefix := CommonPrefixBytes(reqData, prevReqData)
+							// // Skip "[" to have a list of comma-separated JSON objects
+							r := bytes.NewReader(prefix)
+							// Maybe there's a faster way to extract the valid JSON objects from the []byte assuming the JSON has a list of valid objects
+							var v json.RawMessage
+							var n int
+							for {
+								d := json.NewDecoder(r)
+								if err := d.Decode(&v); err != nil {
+									break
+								}
+								// decode is successful, keep track how many bytes take up the valid JSONs so far
+								leftInBuf, _ := io.Copy(io.Discard, d.Buffered())
+								n = r.Len() + int(leftInBuf)
+								// skip ","
+								r.Seek(1, io.SeekCurrent)
+							}
+							prefix = prefix[:len(prefix)-n]
 							logger.Println("===PREFIX===", j, string(prefix))
-							if len(prefix) <= len(prevReqData) {
-								logger.Println("===!!!!!===", j)
-								s.load(j)
-								break
+							if len(prefix) > maxPrefixLen {
+								maxPrefixLen = len(prefix)
+								maxPrefixJ = j
+								// s.load(j)
 							}
 						}
 						allReqsData = append(allReqsData, reqData)
+						if maxPrefixJ >= 0 {
+							logger.Println("===!!!!!===", maxPrefixJ)
+						}
 						break
 					}
 				}
