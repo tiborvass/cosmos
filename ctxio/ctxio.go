@@ -18,8 +18,8 @@ type ReaderFanOut struct {
 
 // Close closes the fan-out Readers as well as the underlying Reader if it implements io.Closer
 func (m *ReaderFanOut) Close() error {
-	// Send error to Reader end, and stop goroutines
-	m.close(io.ErrClosedPipe)
+	// Stop goroutines
+	m.close(nil)
 	err := m.wait()
 	// Close() should return any other error
 	if err == io.ErrClosedPipe {
@@ -52,7 +52,10 @@ func NewReaderFanOut(ctx context.Context, r io.Reader, n int) *ReaderFanOut {
 
 	m.close = func(err error) error {
 		once.Do(func() {
-			cancel()
+			if err != nil {
+				println("TOTO", err.Error())
+			}
+			defer cancel()
 			for _, pw := range pws {
 				pw.CloseWithError(err)
 			}

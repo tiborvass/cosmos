@@ -25,4 +25,4 @@ if [ "$1" = "--clear" ]; then
 fi
 
 # Tail the logs from inside the container
-docker exec "$CONTAINER_ID" tail -f /cosmos/proxy.log
+docker exec "$CONTAINER_ID" tail -f -n 1000 /cosmos/proxy.log

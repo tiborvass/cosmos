@@ -79,6 +79,16 @@ func (s *set) Remove(key string) (n int) {
 	return
 }
 
+type tr struct{}
+
+func (tr) RoundTrip(req *http.Request) (*http.Response, error) {
+	resp, err := http.DefaultTransport.RoundTrip(req)
+	if err != nil {
+		logger.Println("roundtrip error:", err)
+	}
+	return resp, err
+}
+
 func startProxy(addr string, managerConn net.Conn) *Proxy {
 	logger.Printf("Proxy listening on %s\n", addr)
 
@@ -140,6 +150,7 @@ func startProxy(addr string, managerConn net.Conn) *Proxy {
 	var allReqsData [][]byte
 
 	proxy := &httputil.ReverseProxy{
+		Transport: tr{},
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			m.Lock()
 
@@ -169,23 +180,44 @@ func startProxy(addr string, managerConn net.Conn) *Proxy {
 				// Sometimes model is different, so match only starting from messages
 				// i := bytes.Index(reqData, []byte(`"messages":[`))
 				// reqData = reqData[i:]
+				switch len(x.Messages) {
+				case 0:
+					err := fmt.Errorf("unexpected number of messages: %d", len(x.Messages))
+					logger.Printf("===ERROR===: %v\n", err)
+					return
+				case 1:
+					return
+				case 2:
+					allReqsData = append(allReqsData, reqData)
+					return
+				}
+				// Get the N-2 message: the user message that contains the last tool_result
 				var msg anthropic.Message
-				M(json.Unmarshal([]byte(x.Messages[len(x.Messages)-1]), &msg))
+				M(json.Unmarshal([]byte(x.Messages[len(x.Messages)-3]), &msg))
+				if msg.Role != "user" {
+					logger.Printf("===ERROR===: expected role assistant got %q\n", msg.Role)
+					return
+				}
 				logger.Printf("===MSG===: %+v\n", msg)
 				logger.Println("===REQDATA===", string(reqData))
-				for _, content := range msg.Content {
+				for i := len(msg.Content) - 1; i >= 0; i-- {
+					content := msg.Content[i]
+					logger.Printf("===CONTENT===: %+v\n", content)
 					if content.Type == "tool_result" {
-						logger.Println("===TOOL_RESULT===", content.Name)
-						for i := len(allReqsData) - 1; i >= 0; i-- {
-							prevReqData := allReqsData[i]
-							logger.Println("===PREVREQDATA===", i, string(prevReqData))
+						logger.Println("===TOOL_RESULT===", content.ToolUseID)
+						for j := len(allReqsData) - 1; j >= 0; j-- {
+							prevReqData := allReqsData[j]
+							logger.Println("===PREVREQDATA===", j, string(prevReqData))
 							prefix := CommonPrefixBytes(reqData, prevReqData)
-							logger.Println("===PREFIX===", i, string(prefix))
+							logger.Println("===PREFIX===", j, string(prefix))
 							if len(prefix) <= len(prevReqData) {
-								logger.Println("===!!!!!===", i)
+								logger.Println("===!!!!!===", j)
+								s.load(j)
+								break
 							}
 						}
 						allReqsData = append(allReqsData, reqData)
+						break
 					}
 				}
 			}()
@@ -195,7 +227,12 @@ func startProxy(addr string, managerConn net.Conn) *Proxy {
 			pr.Out.Host = ANTHROPIC_BASE_DOMAIN
 		},
 		ModifyResponse: func(resp *http.Response) (rerr error) {
-			defer func() { rerr = Defer(rerr) }()
+			defer func() {
+				rerr = Defer(rerr)
+				if rerr != nil {
+					rerr = fmt.Errorf("toto: %w", rerr)
+				}
+			}()
 			// m.Lock()
 			// defer m.Unlock()
 
@@ -294,7 +331,8 @@ func startProxy(addr string, managerConn net.Conn) *Proxy {
 							logger.Println("acquiring commit lock")
 							toolsQueue.m.Lock()
 							if len(toolsQueue.s) > 0 {
-								s.commit()
+								// TODO: find summary of what was done, or make the commits per tool use
+								s.commit("")
 							}
 							logger.Println("committing ", toolsQueue.s)
 							toolsQueue.s = map[string]struct{}{}
@@ -330,7 +368,7 @@ func startProxy(addr string, managerConn net.Conn) *Proxy {
 
 	// Wait for proxy to be ready (silently)
 	maxRetries := 30
-	for i := 0; i < maxRetries; i++ {
+	for i := range maxRetries {
 		conn, err := net.DialTimeout("tcp", addr, time.Second)
 		if err == nil {
 			conn.Close()
@@ -345,11 +383,25 @@ func startProxy(addr string, managerConn net.Conn) *Proxy {
 	return s
 }
 
-func (p *Proxy) commit() {
+func (p *Proxy) load(historyIndex int) {
 	var x = struct {
 		Action string
+		Data   int
+	}{
+		"load",
+		historyIndex,
+	}
+	logger.Println("Sending load instruction")
+	M(p.manager.Encode(x))
+}
+
+func (p *Proxy) commit(comment string) {
+	var x = struct {
+		Action string
+		Data   string
 	}{
 		"commit",
+		comment,
 	}
 	logger.Println("Sending commit instruction")
 	M(p.manager.Encode(x))
@@ -358,8 +410,10 @@ func (p *Proxy) commit() {
 // Client should not be Client but the subject of the manager
 func startManagerClient(addr string) net.Conn {
 	l := M2(net.Listen("tcp", addr))
+	defer l.Close()
 	logger.Println("listening on ", addr)
 	conn := M2(l.Accept())
+	logger.Println("accepted conn", conn.RemoteAddr())
 	return conn
 }
 

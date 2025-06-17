@@ -12,7 +12,8 @@ RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/
 RUN --mount=type=cache,target=/root/.npm npm install -g @anthropic-ai/claude-code && rm -rf /tmp/* && sed -E -i'' 's/(\|\|process\.env\.API_TIMEOUT_MS\|\|process\.env\.MAX_THINKING_TOKENS)\|\|process\.env\.ANTHROPIC_BASE_URL/\1/' /usr/local/lib/node_modules/@anthropic-ai/claude-code/cli.js
 RUN useradd -ms /bin/bash cosmos
 USER cosmos
-COPY --from=builder --chown=cosmos:cosmos /tmp/cosmos-proxy /usr/local/bin/cosmos-proxy
+COPY --chown=cosmos:cosmos cosmos-proxy /usr/local/bin/cosmos-proxy
+#COPY --from=builder --chown=cosmos:cosmos /tmp/cosmos-proxy /usr/local/bin/cosmos-proxy
 RUN mkdir ~/.claude
 EXPOSE 8042
 ENTRYPOINT ["/usr/local/bin/cosmos-proxy"]

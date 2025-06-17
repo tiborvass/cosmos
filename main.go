@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -45,15 +46,23 @@ var state struct {
 	}
 }
 
+var imgs = []string{"cosmos"}
+
 func manage(ctx context.Context, clientID string, conn net.Conn) {
+	defer func() {
+		fmt.Fprintln(logFile, "Closing conn")
+		conn.Close()
+	}()
 	d := json.NewDecoder(conn)
+	d.UseNumber()
 	var x struct {
 		Action string
-		Data   string
+		Data   any
 	}
 	for {
 		if err := d.Decode(&x); err != nil {
 			if errors.Is(err, io.EOF) {
+				fmt.Fprintln(logFile, "EOF")
 				return
 			}
 			panic(err)
@@ -66,6 +75,12 @@ func manage(ctx context.Context, clientID string, conn net.Conn) {
 			// TODO: check if image exists
 			imgID := R(ctx, "docker commit -m %q %s cosmos:%s", x.Data, clientID, snapshotID)
 			fmt.Fprintln(logFile, "Snapshot", snapshotID, "image", imgID)
+			imgs = append(imgs, imgID)
+		case "load":
+			n := M2(strconv.Atoi(string(x.Data.(json.Number))))
+			imgID := imgs[n]
+			env := append(os.Environ(), fmt.Sprintf("IMAGE=%s", imgID))
+			syscall.Exec(os.Args[0], os.Args, env)
 		}
 	}
 }
@@ -95,7 +110,12 @@ func main() {
 		panic(err)
 	}
 
-	img := "cosmos"
+	img := imgs[0]
+	resume := ""
+	if v := os.Getenv("IMAGE"); v != "" {
+		img = v
+		resume = "-r"
+	}
 	wd := M2(os.Getwd())
 	if project, ok := state.Projects[wd]; ok && len(project.Snapshots) > 0 {
 		img = project.Snapshots[len(project.Snapshots)-1].ID
@@ -121,7 +141,7 @@ func main() {
 
 	// Build docker run command for the combined container
 	// dockerArgs := fmt.Sprintf("docker run --init --rm -v %s:%s -v /tmp/claude.json:/root/.claude.json -v /tmp/claude.state/.credentials.json:/root/.claude/.credentials.json -w %s -e CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 cosmos", workdir, workdir, workdir)
-	dockerArgs := fmt.Sprintf("docker run -d --init -P --rm -h cosmos --tmpfs /cosmos -v %s:/%s -w %s -v /tmp/claude.json:/home/cosmos/.claude.json -v /tmp/claude.state/.credentials.json:/home/cosmos/.claude/.credentials.json -e CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 %s", workdir, workdir, workdir, img)
+	dockerArgs := fmt.Sprintf("docker run -d --init -P --rm -h cosmos --tmpfs /cosmos -v %s:/%s -w %s -v /tmp/claude.json:/home/cosmos/.claude.json -v /tmp/claude.state/.credentials.json:/home/cosmos/.claude/.credentials.json -e CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 %s %s", workdir, workdir, workdir, img, resume)
 	// dockerArgs := fmt.Sprintf("docker run -d --init -P --rm -h cosmos --tmpfs /cosmos -v %s:/%s -w %s -v /tmp/claude.state/.credentials.json:/home/cosmos/.claude/.credentials.json -e CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 %s", workdir, workdir, workdir, img)
 
 	// Add -it if we have a TTY
@@ -174,7 +194,7 @@ func main() {
 		time.Sleep(backoff)
 		backoff *= 2
 	}
-	fmt.Fprintln(logFile, "connected to client")
+	fmt.Fprintf(logFile, "connected to client %v running in %s\n", conn.RemoteAddr(), clientID)
 	if err != nil {
 		panic(fmt.Errorf("failed to connect after %d retries: %v", maxRetries, err))
 	}
