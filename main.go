@@ -73,6 +73,7 @@ func manage(ctx context.Context, clientID string, conn net.Conn) {
 			M2(rand.Read(bytes))
 			snapshotID := hex.EncodeToString(bytes)
 			// TODO: check if image exists
+			fmt.Fprintln(logFile, "Snapshotting...")
 			imgID := R(ctx, "docker commit -m %q %s cosmos:%s", x.Data, clientID, snapshotID)
 			fmt.Fprintln(logFile, "Snapshot", snapshotID, "image", imgID)
 			imgs = append(imgs, imgID)
@@ -92,7 +93,7 @@ func manage(ctx context.Context, clientID string, conn net.Conn) {
 			fmt.Fprintln(logFile, "waiting for container", clientID, "to shutdown")
 			exec.Command("docker", "wait", clientID).Run()
 			fmt.Fprintln(logFile, "load", "image", imgID)
-			env := append(os.Environ(), fmt.Sprintf("IMAGE=%s", imgID))
+			env := append(os.Environ(), "IMAGE="+imgID, "N="+string(n+1))
 			err := syscall.Exec(os.Args[0], os.Args, env)
 			panic(err)
 		}

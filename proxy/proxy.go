@@ -254,7 +254,7 @@ func startProxy(addr string, managerConn net.Conn, cancel context.CancelFunc) *P
 								//&& len(prefix) > maxPrefixLen {
 								//maxPrefixLen = len(prefix)
 								// maxPrefixJ = j
-								s.load(j - 1)
+								s.load(len(allReqsData) - j)
 								s.cancel()
 								return
 							}
