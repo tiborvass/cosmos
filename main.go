@@ -13,7 +13,6 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -57,7 +56,7 @@ func manage(ctx context.Context, clientID string, conn net.Conn) {
 	d.UseNumber()
 	var x struct {
 		Action string
-		Data   any
+		Data   json.RawMessage
 	}
 	for {
 		if err := d.Decode(&x); err != nil {
@@ -74,11 +73,19 @@ func manage(ctx context.Context, clientID string, conn net.Conn) {
 			snapshotID := hex.EncodeToString(bytes)
 			// TODO: check if image exists
 			fmt.Fprintln(logFile, "Snapshotting...")
-			imgID := R(ctx, "docker commit -m %q %s cosmos:%s", x.Data, clientID, snapshotID)
+			var data string
+			M(json.Unmarshal([]byte(x.Data), &data))
+			imgID := R(ctx, "docker commit -m %q %s cosmos:%s", data, clientID, snapshotID)
 			fmt.Fprintln(logFile, "Snapshot", snapshotID, "image", imgID)
 			imgs = append(imgs, imgID)
 		case "load":
-			n := M2(strconv.Atoi(string(x.Data.(json.Number))))
+			var data struct {
+				N      int
+				Prompt string
+			}
+			M(json.Unmarshal([]byte(x.Data), &data))
+			n := data.N
+			prompt := data.Prompt
 			fmt.Fprintln(logFile, "load", "n", n)
 			imgID := imgs[n]
 			conn.Close()
@@ -93,7 +100,7 @@ func manage(ctx context.Context, clientID string, conn net.Conn) {
 			fmt.Fprintln(logFile, "waiting for container", clientID, "to shutdown")
 			exec.Command("docker", "wait", clientID).Run()
 			fmt.Fprintln(logFile, "load", "image", imgID)
-			env := append(os.Environ(), "IMAGE="+imgID, "N="+string(n+1))
+			env := append(os.Environ(), "IMAGE="+imgID, "N="+string(n+1), "CLAUDE_PROMPT="+prompt)
 			err := syscall.Exec(os.Args[0], os.Args, env)
 			panic(err)
 		}
@@ -157,9 +164,11 @@ func main() {
 	// }
 	// claudeJSONBytes = M2(json.Marshal(claudeJSON))
 
+	prompt := os.Getenv("CLAUDE_PROMPT")
+
 	// Build docker run command for the combined container
 	// dockerArgs := fmt.Sprintf("docker run --init --rm -v %s:%s -v /tmp/claude.json:/root/.claude.json -v /tmp/claude.state/.credentials.json:/root/.claude/.credentials.json -w %s -e CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 cosmos", workdir, workdir, workdir)
-	dockerArgs := fmt.Sprintf("docker run -d --init -P -h cosmos -v %q:/cosmos -w %q -v /tmp/claude.json:/home/cosmos/.claude.json -v /tmp/claude.state/.credentials.json:/home/cosmos/.claude/.credentials.json -e CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 %q %s", cosmosLogDir, workdir, img, resume)
+	dockerArgs := fmt.Sprintf("docker run -d --init -P -h cosmos -v %q:/cosmos -w %q -v /tmp/claude.json:/home/cosmos/.claude.json -v /tmp/claude.state/.credentials.json:/home/cosmos/.claude/.credentials.json -e CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 %q %s %q", cosmosLogDir, workdir, img, resume, prompt)
 	// dockerArgs := fmt.Sprintf("docker run -d --init -P --rm -h cosmos --tmpfs /cosmos -v %s:/%s -w %s -v /tmp/claude.state/.credentials.json:/home/cosmos/.claude/.credentials.json -e CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 %s", workdir, workdir, workdir, img)
 
 	// Add -it if we have a TTY

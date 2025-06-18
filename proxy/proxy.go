@@ -254,8 +254,15 @@ func startProxy(addr string, managerConn net.Conn, cancel context.CancelFunc) *P
 								//&& len(prefix) > maxPrefixLen {
 								//maxPrefixLen = len(prefix)
 								// maxPrefixJ = j
-								s.load(len(allReqsData) - j)
-								s.cancel()
+								M(json.Unmarshal([]byte(x.Messages[len(x.Messages)-1]), &msg))
+								var x []struct {
+									Type string
+									Text string
+								}
+								M(json.Unmarshal([]byte(msg.Content), &x))
+								prompt := x[len(x)-1].Text
+								s.load(len(allReqsData)-j, prompt)
+								// s.cancel()
 								return
 							}
 						}
@@ -430,13 +437,19 @@ func startProxy(addr string, managerConn net.Conn, cancel context.CancelFunc) *P
 	return s
 }
 
-func (p *Proxy) load(historyIndex int) {
+func (p *Proxy) load(historyIndex int, prompt string) {
 	var x = struct {
 		Action string
-		Data   int
+		Data   struct {
+			N      int
+			Prompt string
+		}
 	}{
 		"load",
-		historyIndex,
+		struct {
+			N      int
+			Prompt string
+		}{historyIndex, prompt},
 	}
 	logger.Println("Sending load instruction")
 	if err := p.manager.Encode(x); err == io.EOF {
