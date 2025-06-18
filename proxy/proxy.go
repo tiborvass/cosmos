@@ -54,6 +54,7 @@ type Proxy struct {
 	http.Server
 	manager *json.Encoder
 	tt      *ToolsTracker
+	cancel  func()
 	// w       *fsnotify.Watcher
 }
 
@@ -90,7 +91,7 @@ func (tr) RoundTrip(req *http.Request) (*http.Response, error) {
 	return resp, err
 }
 
-func startProxy(addr string, managerConn net.Conn) *Proxy {
+func startProxy(addr string, managerConn net.Conn, cancel context.CancelFunc) *Proxy {
 	logger.Printf("Proxy listening on %s\n", addr)
 
 	var (
@@ -100,6 +101,7 @@ func startProxy(addr string, managerConn net.Conn) *Proxy {
 	s := &Proxy{
 		Server:  http.Server{Addr: addr},
 		manager: json.NewEncoder(managerConn),
+		cancel:  cancel,
 	}
 
 	// s.w, err = fsnotify.NewWatcher()
@@ -422,7 +424,11 @@ func (p *Proxy) load(historyIndex int) {
 		historyIndex,
 	}
 	logger.Println("Sending load instruction")
-	M(p.manager.Encode(x))
+	if err := p.manager.Encode(x); err == io.EOF {
+		p.cancel()
+	} else if err != nil {
+		panic(err)
+	}
 }
 
 func (p *Proxy) commit(comment string) {
@@ -434,7 +440,11 @@ func (p *Proxy) commit(comment string) {
 		comment,
 	}
 	logger.Println("Sending commit instruction")
-	M(p.manager.Encode(x))
+	if err := p.manager.Encode(x); err == io.EOF {
+		p.cancel()
+	} else if err != nil {
+		panic(err)
+	}
 }
 
 // Client should not be Client but the subject of the manager
@@ -450,7 +460,7 @@ func startManagerClient(addr string) net.Conn {
 func main() {
 	logger.Println("Starting proxy...", isatty.IsTerminal(os.Stdin.Fd()))
 	defer logger.Println("Proxy shutdown complete")
-	ctx := context.Background()
+	ctx, cancel := context.WithCancel(context.Background())
 
 	// ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	// defer func() {
@@ -467,7 +477,7 @@ func main() {
 	logger.Println("Client started")
 
 	proxyAddr := "localhost:8080"
-	proxy := startProxy(proxyAddr, managerConn)
+	proxy := startProxy(proxyAddr, managerConn, cancel)
 
 	logger.Println("Proxy started")
 

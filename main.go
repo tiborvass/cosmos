@@ -79,6 +79,17 @@ func manage(ctx context.Context, clientID string, conn net.Conn) {
 		case "load":
 			n := M2(strconv.Atoi(string(x.Data.(json.Number))))
 			imgID := imgs[n]
+			conn.Close()
+			done := make(chan struct{})
+			go func() {
+				select {
+				case <-done:
+				case <-time.After(2 * time.Second):
+					exec.Command("docker", "kill", "-s", "SIGKILL", clientID).Run()
+				}
+			}()
+			fmt.Fprintln(logFile, "waiting for container", clientID, "to shutdown")
+			exec.Command("docker", "wait", clientID).Run()
 			fmt.Fprintln(logFile, "load", "n", n, "image", imgID)
 			env := append(os.Environ(), fmt.Sprintf("IMAGE=%s", imgID))
 			syscall.Exec(os.Args[0], os.Args, env)
@@ -208,6 +219,7 @@ func main() {
 	go manage(ctx, clientID, conn)
 
 	cmd := exec.CommandContext(ctx, "docker", "attach", clientID)
+	// NOTE: i think this is useless if it's supposed to be called manually.
 	cmd.Cancel = func() error {
 		fmt.Fprintln(logFile, "cancelling", clientID)
 		return nil
