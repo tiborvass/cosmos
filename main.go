@@ -79,6 +79,7 @@ func manage(ctx context.Context, clientID string, conn net.Conn) {
 		case "load":
 			n := M2(strconv.Atoi(string(x.Data.(json.Number))))
 			imgID := imgs[n]
+			fmt.Fprintln(logFile, "load", "n", n, "image", imgID)
 			env := append(os.Environ(), fmt.Sprintf("IMAGE=%s", imgID))
 			syscall.Exec(os.Args[0], os.Args, env)
 		}

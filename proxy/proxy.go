@@ -193,8 +193,10 @@ func startProxy(addr string, managerConn net.Conn) *Proxy {
 				}
 				logger.Printf("===MSG===: %+v\n", msg)
 
+				// Only account for msg.Content, because other fields in msg can vary (notably "cache_control" field)
 				reqData := M2(json.Marshal(msg.Content))
-				reqData = reqData[1 : len(reqData)-2]
+				// Remove '[' and ']' so we can manually JSON decode in a loop the common prefix which may not be at a valid JSON boundary.
+				reqData = reqData[1 : len(reqData)-1]
 				// reqData := M2(io.ReadAll(io.TeeReader(dupBody, logger.Writer())))
 				// M(json.Unmarshal(reqData, &x))
 				// Sometimes model is different, so match only starting from messages
@@ -208,7 +210,7 @@ func startProxy(addr string, managerConn net.Conn) *Proxy {
 					logger.Printf("===CONTENT===: %+v\n", content)
 					if content.Type == "tool_result" {
 						logger.Println("===TOOL_RESULT===", content.ToolUseID)
-						maxPrefixJ, maxPrefixLen := -1, 0
+						// maxPrefixJ, maxPrefixLen := -1, 0
 						for j := len(allReqsData) - 1; j >= 0; j-- {
 							prevReqData := allReqsData[j]
 							logger.Println("===PREVREQDATA===", j, string(prevReqData))
@@ -225,22 +227,26 @@ func startProxy(addr string, managerConn net.Conn) *Proxy {
 								}
 								// decode is successful, keep track how many bytes take up the valid JSONs so far
 								leftInBuf, _ := io.Copy(io.Discard, d.Buffered())
+								// total unread = unread bytes reader portion + what's still in JSON buffer
 								n = r.Len() + int(leftInBuf)
 								// skip ","
 								r.Seek(1, io.SeekCurrent)
 							}
+
 							prefix = prefix[:len(prefix)-n]
 							logger.Println("===PREFIX===", j, string(prefix))
-							if len(prefix) > maxPrefixLen {
-								maxPrefixLen = len(prefix)
-								maxPrefixJ = j
-								// s.load(j)
+							if len(prefix) == len(prevReqData) {
+								logger.Println("===!!!!!===", j)
+								//&& len(prefix) > maxPrefixLen {
+								//maxPrefixLen = len(prefix)
+								// maxPrefixJ = j
+								s.load(j - 1)
 							}
 						}
 						allReqsData = append(allReqsData, reqData)
-						if maxPrefixJ >= 0 {
-							logger.Println("===!!!!!===", maxPrefixJ)
-						}
+						// if maxPrefixJ >= 0 {
+						// logger.Println("===!!!!!===", maxPrefixJ)
+						// }
 						break
 					}
 				}
