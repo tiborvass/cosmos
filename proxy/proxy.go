@@ -43,8 +43,7 @@ func init() {
 	// Log to a file instead of stdout to avoid conflicts with Claude's TUI
 	logFile, err := os.OpenFile("/cosmos/proxy.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	if err != nil {
-		// Fallback to stderr if we can't open the log file
-		logger = log.New(os.Stderr, "\n[PROXY] ", log.LstdFlags)
+		panic(err)
 	} else {
 		logger = log.New(logFile, "\n[PROXY] ", log.LstdFlags)
 	}
@@ -256,6 +255,8 @@ func startProxy(addr string, managerConn net.Conn, cancel context.CancelFunc) *P
 								//maxPrefixLen = len(prefix)
 								// maxPrefixJ = j
 								s.load(j - 1)
+								s.cancel()
+								return
 							}
 						}
 						allReqsData = append(allReqsData, reqData)

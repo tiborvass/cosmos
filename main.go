@@ -93,7 +93,8 @@ func manage(ctx context.Context, clientID string, conn net.Conn) {
 			exec.Command("docker", "wait", clientID).Run()
 			fmt.Fprintln(logFile, "load", "image", imgID)
 			env := append(os.Environ(), fmt.Sprintf("IMAGE=%s", imgID))
-			syscall.Exec(os.Args[0], os.Args, env)
+			err := syscall.Exec(os.Args[0], os.Args, env)
+			panic(err)
 		}
 	}
 }
@@ -114,9 +115,10 @@ func main() {
 	args := os.Args[2:]
 
 	cosmosDir := filepath.Join(M2(os.UserConfigDir()), ".cosmos")
+	cosmosLogDir := filepath.Join(cosmosDir, "containerlogs")
 	os.MkdirAll(cosmosDir, 0755)
 
-	stateFile, err := os.Open("~/.cosmos/state.json")
+	stateFile, err := os.Open(filepath.Join(cosmosDir, "state.json"))
 	if err == nil {
 		M(json.NewDecoder(stateFile).Decode(&state))
 	} else if !os.IsNotExist(err) {
@@ -125,15 +127,18 @@ func main() {
 
 	img := imgs[0]
 	resume := ""
-	if v := os.Getenv("IMAGE"); v != "" {
-		img = v
+	IMAGE := os.Getenv("IMAGE")
+	if IMAGE != "" {
+		img = IMAGE
 		resume = "-c"
 	}
 	// panic("resume: " + resume)
-	wd := M2(os.Getwd())
-	if project, ok := state.Projects[wd]; ok && len(project.Snapshots) > 0 {
-		img = project.Snapshots[len(project.Snapshots)-1].ID
-	}
+	workdir := M2(os.Getwd())
+	/*
+		if project, ok := state.Projects[workdir]; ok && len(project.Snapshots) > 0 {
+			img = project.Snapshots[len(project.Snapshots)-1].ID
+		}
+	*/
 
 	ctx := context.Background()
 
@@ -151,11 +156,9 @@ func main() {
 	// }
 	// claudeJSONBytes = M2(json.Marshal(claudeJSON))
 
-	workdir := M2(os.Getwd())
-
 	// Build docker run command for the combined container
 	// dockerArgs := fmt.Sprintf("docker run --init --rm -v %s:%s -v /tmp/claude.json:/root/.claude.json -v /tmp/claude.state/.credentials.json:/root/.claude/.credentials.json -w %s -e CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 cosmos", workdir, workdir, workdir)
-	dockerArgs := fmt.Sprintf("docker run -d --init -P --rm -h cosmos --tmpfs /cosmos -v %s:/%s -w %s -v /tmp/claude.json:/home/cosmos/.claude.json -v /tmp/claude.state/.credentials.json:/home/cosmos/.claude/.credentials.json -e CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 %s %s", workdir, workdir, workdir, img, resume)
+	dockerArgs := fmt.Sprintf("docker run -d --init -P -h cosmos -v %q:/cosmos -w %q -v /tmp/claude.json:/home/cosmos/.claude.json -v /tmp/claude.state/.credentials.json:/home/cosmos/.claude/.credentials.json -e CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 %q %s", cosmosLogDir, workdir, img, resume)
 	// dockerArgs := fmt.Sprintf("docker run -d --init -P --rm -h cosmos --tmpfs /cosmos -v %s:/%s -w %s -v /tmp/claude.state/.credentials.json:/home/cosmos/.claude/.credentials.json -e CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 %s", workdir, workdir, workdir, img)
 
 	// Add -it if we have a TTY
@@ -163,13 +166,12 @@ func main() {
 		dockerArgs = strings.Replace(dockerArgs, "docker run ", "docker run -it ", 1)
 	}
 
-	args = append(strings.Fields(dockerArgs), args...)
-
-	fmt.Fprintln(logFile, args)
+	shArgs := dockerArgs + " " + strings.Join(args, " ")
 
 	// Run the container directly with stdin/stdout/stderr attached
-	clientID := RS(ctx, args)
+	clientID := R(ctx, shArgs)
 
+	// Not needed if docker run --rm ?
 	defer func() {
 		exec.Command("docker", "rm", "-vf", clientID).Run()
 	}()
@@ -194,6 +196,12 @@ func main() {
 
 	clientPort := "8042"
 	clientAddr := R(ctx, "docker port %s %s/tcp", clientID, clientPort)
+
+	// Only copy workdir if we're not reexecuting.
+	if IMAGE == "" {
+		R(ctx, "docker cp %q %q:%q", workdir, clientID, workdir)
+		R(ctx, "docker exec -u root %q chown -R cosmos:cosmos %q", clientID, workdir)
+	}
 
 	fmt.Fprintln(logFile, "connecting to client", clientAddr)
 	dialer := &net.Dialer{}

@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
-	"strings"
 )
 
 func M2[T any](v T, err error) T {
@@ -28,7 +27,7 @@ func RS(ctx context.Context, args []string) string {
 	if err != nil {
 		panic(fmt.Errorf("%s: %w", string(out), err))
 	}
-	if out[len(out)-1] == '\n' {
+	if len(out) > 0 && out[len(out)-1] == '\n' {
 		out = out[:len(out)-1]
 	}
 	return string(out)
@@ -53,5 +52,5 @@ func Defer(rerr error) error {
 }
 
 func R(ctx context.Context, format string, args ...any) string {
-	return RS(ctx, strings.Fields(fmt.Sprintf(format, args...)))
+	return RS(ctx, []string{"sh", "-c", fmt.Sprintf(format, args...)})
 }
