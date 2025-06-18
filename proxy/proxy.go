@@ -187,13 +187,16 @@ func startProxy(addr string, managerConn net.Conn, cancel context.CancelFunc) *P
 					return
 				}
 				// Get the N-2 message: the user message that contains the last tool_result
-				var msg anthropic.Message
+				var msg struct {
+					Role    string
+					Content json.RawMessage
+				}
 				M(json.Unmarshal([]byte(x.Messages[len(x.Messages)-3]), &msg))
 				if msg.Role != "user" {
 					logger.Printf("===ERROR===: expected role assistant got %q\n", msg.Role)
 					return
 				}
-				logger.Printf("===MSG===: %+v\n", msg)
+				logger.Printf("===MSG===: %#v\n", msg)
 
 				// Only account for msg.Content, because other fields in msg can vary (notably "cache_control" field)
 				reqData := M2(json.Marshal(msg.Content))
@@ -206,9 +209,19 @@ func startProxy(addr string, managerConn net.Conn, cancel context.CancelFunc) *P
 				// reqData = reqData[i:]
 				// allReqsData = append(allReqsData, reqData)
 
+				if msg.Content[0] == '"' {
+					logger.Println("===STRCONTENT===", string(msg.Content))
+					return
+				}
+				var contents []struct {
+					ToolUseID string
+					Type      string
+					Content   json.RawMessage
+				}
+				M(json.Unmarshal(msg.Content, &contents))
 				logger.Println("===REQDATA===", string(reqData))
-				for i := len(msg.Content) - 1; i >= 0; i-- {
-					content := msg.Content[i]
+				for i := len(contents) - 1; i >= 0; i-- {
+					content := contents[i]
 					logger.Printf("===CONTENT===: %+v\n", content)
 					if content.Type == "tool_result" {
 						logger.Println("===TOOL_RESULT===", content.ToolUseID)
@@ -344,6 +357,7 @@ func startProxy(addr string, managerConn net.Conn, cancel context.CancelFunc) *P
 					M(msg.Accumulate(ev))
 					if _, ok := ev.AsAny().(anthropic.MessageStopEvent); ok {
 						logger.Println("\n\n===TOTO===", msg)
+						toolUseID := ""
 						// Just in case Claude does not accumulate like we do, and starts executing tools as it streams partial json
 						// there could be a race, where Claude executes a tool, writes to jsonlog before we get to AddPendingTool.
 						// FIXME: Tracker should not delete from a map, it should just have 2 maps: one for what's gonna be executed
@@ -351,7 +365,7 @@ func startProxy(addr string, managerConn net.Conn, cancel context.CancelFunc) *P
 						for _, content := range msg.Content {
 							if content.Type == "tool_use" {
 								// For some reason msg.ToolUseID is empty
-								toolUseID := content.ID
+								toolUseID = content.ID
 								toolsQueue.Add(toolUseID)
 								// tt.AddPendingTool(toolUseID)
 								logger.Printf("FOUND EVENT: %s: %v\n", event.Event, toolUseID)
@@ -364,7 +378,7 @@ func startProxy(addr string, managerConn net.Conn, cancel context.CancelFunc) *P
 							toolsQueue.m.Lock()
 							if len(toolsQueue.s) > 0 {
 								// TODO: find summary of what was done, or make the commits per tool use
-								s.commit("")
+								s.commit(toolUseID)
 							}
 							logger.Println("committing ", toolsQueue.s)
 							toolsQueue.s = map[string]struct{}{}
@@ -487,6 +501,8 @@ func main() {
 	claudeCmd.Stdin = os.Stdin
 	claudeCmd.Stdout = os.Stdout
 	claudeCmd.Stderr = os.Stderr
+
+	logger.Println(claudeCmd.Env)
 
 	// Create a channel to receive OS signals.
 	sigch := make(chan os.Signal, 1)

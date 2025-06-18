@@ -78,6 +78,7 @@ func manage(ctx context.Context, clientID string, conn net.Conn) {
 			imgs = append(imgs, imgID)
 		case "load":
 			n := M2(strconv.Atoi(string(x.Data.(json.Number))))
+			fmt.Fprintln(logFile, "load", "n", n)
 			imgID := imgs[n]
 			conn.Close()
 			done := make(chan struct{})
@@ -90,7 +91,7 @@ func manage(ctx context.Context, clientID string, conn net.Conn) {
 			}()
 			fmt.Fprintln(logFile, "waiting for container", clientID, "to shutdown")
 			exec.Command("docker", "wait", clientID).Run()
-			fmt.Fprintln(logFile, "load", "n", n, "image", imgID)
+			fmt.Fprintln(logFile, "load", "image", imgID)
 			env := append(os.Environ(), fmt.Sprintf("IMAGE=%s", imgID))
 			syscall.Exec(os.Args[0], os.Args, env)
 		}
@@ -126,7 +127,7 @@ func main() {
 	resume := ""
 	if v := os.Getenv("IMAGE"); v != "" {
 		img = v
-		resume = "-r"
+		resume = "-c"
 	}
 	// panic("resume: " + resume)
 	wd := M2(os.Getwd())
