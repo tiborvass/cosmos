@@ -165,10 +165,11 @@ func main() {
 	// claudeJSONBytes = M2(json.Marshal(claudeJSON))
 
 	prompt := os.Getenv("CLAUDE_PROMPT")
+	fmt.Fprintln(logFile, "prompt", prompt)
 
 	// Build docker run command for the combined container
 	// dockerArgs := fmt.Sprintf("docker run --init --rm -v %s:%s -v /tmp/claude.json:/root/.claude.json -v /tmp/claude.state/.credentials.json:/root/.claude/.credentials.json -w %s -e CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 cosmos", workdir, workdir, workdir)
-	dockerArgs := fmt.Sprintf("docker run -d --init -P -h cosmos -v %q:/cosmos -w %q -v /tmp/claude.json:/home/cosmos/.claude.json -v /tmp/claude.state/.credentials.json:/home/cosmos/.claude/.credentials.json -e CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 %q %s %q", cosmosLogDir, workdir, img, resume, prompt)
+	dockerArgs := fmt.Sprintf("docker run -d --init -P -h cosmos -v %q:/cosmos -w %q -v /tmp/claude.json:/home/cosmos/.claude.json -v /tmp/claude.state/.credentials.json:/home/cosmos/.claude/.credentials.json -e CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 %q %s", cosmosLogDir, workdir, img, resume)
 	// dockerArgs := fmt.Sprintf("docker run -d --init -P --rm -h cosmos --tmpfs /cosmos -v %s:/%s -w %s -v /tmp/claude.state/.credentials.json:/home/cosmos/.claude/.credentials.json -e CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 %s", workdir, workdir, workdir, img)
 
 	// Add -it if we have a TTY
@@ -176,15 +177,17 @@ func main() {
 		dockerArgs = strings.Replace(dockerArgs, "docker run ", "docker run -it ", 1)
 	}
 
-	shArgs := dockerArgs + " " + strings.Join(args, " ")
+	shArgs := dockerArgs + " " + strings.Join(args, " ") + fmt.Sprintf(" %q", prompt)
+
+	fmt.Fprintln(logFile, "exec", shArgs)
 
 	// Run the container directly with stdin/stdout/stderr attached
 	clientID := R(ctx, shArgs)
 
 	// Not needed if docker run --rm ?
-	defer func() {
-		exec.Command("docker", "rm", "-vf", clientID).Run()
-	}()
+	// defer func() {
+	// 	exec.Command("docker", "rm", "-vf", clientID).Run()
+	// }()
 
 	// Create a channel to receive OS signals.
 	sigs := make(chan os.Signal, 1)
