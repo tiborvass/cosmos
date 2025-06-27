@@ -9,7 +9,9 @@ RUN --mount=target=/w --mount=type=cache,target=/root/.cache/go-build --mount=ty
 
 FROM node:24.1.0-slim@sha256:5ae787590295f944e7dc200bf54861bac09bf21b5fdb4c9b97aee7781b6d95a2 AS cosmos
 RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/* /tmp/*
-RUN --mount=type=cache,target=/root/.npm npm install -g @anthropic-ai/claude-code && rm -rf /tmp/* && sed -E -i'' 's/(\|\|process\.env\.API_TIMEOUT_MS\|\|process\.env\.MAX_THINKING_TOKENS)\|\|process\.env\.ANTHROPIC_BASE_URL/\1/' /usr/local/lib/node_modules/@anthropic-ai/claude-code/cli.js
+RUN --mount=type=cache,target=/root/.npm npm install -g @anthropic-ai/claude-code && rm -rf /tmp/* && f=/usr/local/lib/node_modules/@anthropic-ai/claude-code/cli.js && \
+    sed -E -i'' 's/(\|\|process\.env\.API_TIMEOUT_MS\|\|process\.env\.MAX_THINKING_TOKENS)\|\|process\.env\.ANTHROPIC_BASE_URL/\1/' "$f" && \
+    x=$(grep -m1 -Eo ',\{([^:]+:[^,\}]+,)+initialPrompt: *[^,"]+,' "$f" | head -1 | sed -E 's/.*,initialPrompt:([^,]+),$/\1/'); sed -Ei'' 's/("No conversation found to continue".*default\.createElement\(.*\binitialPrompt: *)"",/\1'"$x"',/' "$f"
 RUN useradd -ms /bin/bash cosmos
 USER cosmos
 COPY --chown=cosmos:cosmos cosmos-proxy /usr/local/bin/cosmos-proxy
