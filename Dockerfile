@@ -13,6 +13,7 @@ RUN --mount=type=cache,target=/root/.npm npm install -g @anthropic-ai/claude-cod
     sed -E -i'' 's/(\|\|process\.env\.API_TIMEOUT_MS\|\|process\.env\.MAX_THINKING_TOKENS)\|\|process\.env\.ANTHROPIC_BASE_URL/\1/' "$f" && \
     x=$(grep -m1 -Eo ',\{([^:]+:[^,\}]+,)+initialPrompt: *[^,"]+,' "$f" | head -1 | sed -E 's/.*,initialPrompt:([^,]+),$/\1/'); sed -Ei'' 's/("No conversation found to continue".*default\.createElement\(.*\binitialPrompt: *)"",/\1'"$x"',/' "$f"
 RUN useradd -ms /bin/bash cosmos
+COPY inject-write.js /tmp/inject-write.js
 USER cosmos
 COPY --chown=cosmos:cosmos cosmos-proxy /usr/local/bin/cosmos-proxy
 #COPY --from=builder --chown=cosmos:cosmos /tmp/cosmos-proxy /usr/local/bin/cosmos-proxy

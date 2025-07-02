@@ -3,3 +3,4 @@
 !go.sum
 !**/*.go
 !cosmos-proxy
+!inject-write.js

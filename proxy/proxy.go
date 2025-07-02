@@ -510,7 +510,9 @@ func main() {
 	logger.Println("Proxy started")
 
 	// Execute claude with all arguments passed to the entrypoint
-	claudeCmd := exec.CommandContext(ctx, "/usr/local/bin/claude", os.Args[1:]...)
+	nodeArgs := []string{"node", "--no-warnings", "--enable-source-maps", "--require=/tmp/inject-write.js", "/usr/local/lib/node_modules/@anthropic-ai/claude-code/cli.js"}
+	nodeArgs = append(nodeArgs, os.Args[1:]...)
+	claudeCmd := exec.CommandContext(ctx, nodeArgs[0], nodeArgs[1:]...)
 	claudeCmd.Env = append(os.Environ(), "ANTHROPIC_BASE_URL=http://"+proxyAddr)
 	claudeCmd.Stdin = os.Stdin
 	claudeCmd.Stdout = os.Stdout
