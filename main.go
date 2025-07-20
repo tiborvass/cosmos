@@ -176,7 +176,7 @@ func main() {
 	exec.Command("touch", claudeJsonPath).Run()
 	exec.Command("touch", credentialsJsonPath).Run()
 
-	dockerArgs := fmt.Sprintf("docker run -d --init -P -h cosmos -v %q:/cosmos -w %q -v %s:/home/cosmos/.claude.json -v %s:/home/cosmos/.claude/.credentials.json -e CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 %q %s", cosmosLogDir, workdir, claudeJsonPath, credentialsJsonPath, img, resume)
+	dockerArgs := fmt.Sprintf("docker run -d --init -P -h cosmos -v %q:/cosmos -w %q -v %s:/home/cosmos/.claude.json -v %s:/home/cosmos/.claude/.credentials.json -e CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 %q --dangerously-skip-permissions %s", cosmosLogDir, workdir, claudeJsonPath, credentialsJsonPath, img, resume)
 	// dockerArgs := fmt.Sprintf("docker run -d --init -P --rm -h cosmos --tmpfs /cosmos -v %s:/%s -w %s -v /tmp/claude.state/.credentials.json:/home/cosmos/.claude/.credentials.json -e CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 %s", workdir, workdir, workdir, img)
 
 	// Add -it if we have a TTY
