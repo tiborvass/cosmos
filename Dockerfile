@@ -14,8 +14,8 @@ RUN --mount=type=cache,target=/root/.npm npm install -g @anthropic-ai/claude-cod
     x=$(grep -m1 -Eo ',\{([^:]+:[^,\}]+,)+initialPrompt: *[^,"]+,' "$f" | head -1 | sed -E 's/.*,initialPrompt:([^,]+),$/\1/'); sed -Ei'' 's/("No conversation found to continue".*default\.createElement\(.*\binitialPrompt: *)"",/\1'"$x"',/' "$f"
 RUN useradd -ms /bin/bash cosmos
 USER cosmos
-COPY --chown=cosmos:cosmos cosmos-proxy /usr/local/bin/cosmos-proxy
-#COPY --from=builder --chown=cosmos:cosmos /tmp/cosmos-proxy /usr/local/bin/cosmos-proxy
+#COPY --chown=cosmos:cosmos cosmos-proxy /usr/local/bin/cosmos-proxy
+COPY --from=builder --chown=cosmos:cosmos /tmp/cosmos-proxy /usr/local/bin/cosmos-proxy
 RUN mkdir ~/.claude
 EXPOSE 8042
 ENTRYPOINT ["/usr/local/bin/cosmos-proxy"]

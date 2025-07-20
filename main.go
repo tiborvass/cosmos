@@ -169,7 +169,14 @@ func main() {
 
 	// Build docker run command for the combined container
 	// dockerArgs := fmt.Sprintf("docker run --init --rm -v %s:%s -v /tmp/claude.json:/root/.claude.json -v /tmp/claude.state/.credentials.json:/root/.claude/.credentials.json -w %s -e CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 cosmos", workdir, workdir, workdir)
-	dockerArgs := fmt.Sprintf("docker run -d --init -P -h cosmos -v %q:/cosmos -w %q -v /tmp/claude.json:/home/cosmos/.claude.json -v /tmp/claude.state/.credentials.json:/home/cosmos/.claude/.credentials.json -e CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 %q %s", cosmosLogDir, workdir, img, resume)
+
+	home := M2(os.UserHomeDir())
+	claudeJsonPath := filepath.Join(home, ".claude.json")
+	credentialsJsonPath := filepath.Join(home, ".credentials.json")
+	exec.Command("touch", claudeJsonPath).Run()
+	exec.Command("touch", credentialsJsonPath).Run()
+
+	dockerArgs := fmt.Sprintf("docker run -d --init -P -h cosmos -v %q:/cosmos -w %q -v %s:/home/cosmos/.claude.json -v %s:/home/cosmos/.claude/.credentials.json -e CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 %q %s", cosmosLogDir, workdir, claudeJsonPath, credentialsJsonPath, img, resume)
 	// dockerArgs := fmt.Sprintf("docker run -d --init -P --rm -h cosmos --tmpfs /cosmos -v %s:/%s -w %s -v /tmp/claude.state/.credentials.json:/home/cosmos/.claude/.credentials.json -e CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 %s", workdir, workdir, workdir, img)
 
 	// Add -it if we have a TTY
